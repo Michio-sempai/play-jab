@@ -1,6 +1,40 @@
-# guitest
+# play-jab
 
+Кросс-платформенный фреймворк автоматизации GUI настольных приложений в стиле Playwright.
+Подробности — в [`.todo/CONCEPT.MD`](.todo/CONCEPT.MD).
 
+## Разработка
+
+Проект использует [uv](https://docs.astral.sh/uv/) для управления окружением и сборкой.
+
+```sh
+uv sync --all-groups
+uv run pre-commit install --install-hooks
+uv run pre-commit install --hook-type commit-msg
+
+uv run pytest
+uv run ruff check . && uv run ruff format --check .
+uv run flake8 src tests
+uv run mypy src
+```
+
+Коммиты оформляются в стиле [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat:`, `fix:`, `docs:`, ...) — это проверяется хуком `commitizen` и в CI.
+
+### Версионирование
+
+Версии календарные (CalVer, `YYYY.0M`, например `2026.08`, `2026.09`) — они не связаны с
+типом коммитов, а отражают месяц релиза. Чтобы выпустить релиз:
+
+```sh
+uv run bumpver update             # поднимает версию в pyproject.toml до текущего месяца,
+                                   # коммитит и создаёт тег vYYYY.0M (push отключён по умолчанию)
+git push origin main --tags       # запускает CI-джобу release → публикацию в PyPI по тегу
+uv run cz changelog                # (опционально) собрать записи в CHANGELOG.md из коммитов
+```
+
+Если релизов в одном месяце несколько, добавьте инкремент вручную (например `2026.08.1`)
+и поправьте `current_version`/`version_pattern` в `[tool.bumpver]` при необходимости.
 
 ## Getting started
 
@@ -15,14 +49,14 @@ Already a pro? Just edit this README.md and make it your own. Want to make it ea
 
 ```
 cd existing_repo
-git remote add origin https://gitlab.com/dashanovsd/guitest.git
+git remote add origin https://gitlab.com/dashanovsd/play-jab.git
 git branch -M main
 git push -uf origin main
 ```
 
 ## Integrate with your tools
 
-* [Set up project integrations](https://gitlab.com/dashanovsd/guitest/-/settings/integrations)
+* [Set up project integrations](https://gitlab.com/dashanovsd/play-jab/-/settings/integrations)
 
 ## Collaborate with your team
 
