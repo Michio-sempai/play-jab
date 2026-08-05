@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
-
 import pytest
 
 from play_jab import sync_api
@@ -23,11 +19,6 @@ OTHER_PID = 9876
 HWND = 0x1234
 SECOND_HWND = 0x5678
 OTHER_HWND = 0x9999
-
-
-@dataclass(frozen=True)
-class FakeProcessHandle:
-    pid: int
 
 
 class FakeWindows:
@@ -51,19 +42,6 @@ class FakeWindows:
 class FakeProcesses:
     def __init__(self) -> None:
         self.alive: set[int] = {PID, OTHER_PID}
-        self.launches: list[
-            tuple[str | Sequence[str], str | Path | None, Mapping[str, str] | None]
-        ] = []
-
-    def launch(
-        self,
-        command: str | Sequence[str],
-        *,
-        cwd: str | Path | None,
-        env: Mapping[str, str] | None,
-    ) -> FakeProcessHandle:
-        self.launches.append((command, cwd, env))
-        return FakeProcessHandle(PID)
 
     def is_alive(self, pid: int) -> bool:
         return pid in self.alive
@@ -86,7 +64,7 @@ def api_backends(
     processes = FakeProcesses()
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
-    monkeypatch.setattr(sync_api, "_create_process_backend", lambda: processes)
+    monkeypatch.setattr(sync_api, "_is_process_alive", processes.is_alive)
     return PlayJab(), runtime, backend, windows, processes
 
 
@@ -188,24 +166,6 @@ def test_window_hwnd_must_belong_to_the_application_pid(
             application.window(hwnd=OTHER_HWND, timeout=0)
 
 
-def test_launch_returns_immediately_and_never_terminates_the_process(
-    api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
-    ],
-) -> None:
-    api, _, _, _, processes = api_backends
-    environment = {"LANG": "ru_RU.UTF-8"}
-    with api:
-        application = api.launch(
-            ["java", "-jar", "fixture.jar"], cwd=Path("fixture"), env=environment
-        )
-        assert application.pid == PID
-    assert processes.launches == [
-        (["java", "-jar", "fixture.jar"], Path("fixture"), environment)
-    ]
-    assert PID in processes.alive
-
-
 def test_dead_process_is_reported_before_window_lookup(
     api_backends: tuple[
         PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
@@ -231,7 +191,6 @@ def test_constructor_validates_timeout_before_creating_native_backends(
 
     monkeypatch.setattr(sync_api, "_create_runtime", unexpected)
     monkeypatch.setattr(sync_api, "_create_window_backend", unexpected)
-    monkeypatch.setattr(sync_api, "_create_process_backend", unexpected)
     with pytest.raises(ValueError, match="timeout"):
         PlayJab(timeout=timeout)  # type: ignore[arg-type]
 

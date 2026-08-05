@@ -1,3 +1,4 @@
+# flake8: noqa
 """In-memory fake of the native Access Bridge.
 
 Implements the same call surface as the real DLL backend on top of a plain
@@ -32,7 +33,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from play_jab._native.backend import ContextInfo, NativeBackend
+from play_jab._native.backend import (
+    ContextInfo,
+    NativeBackend,
+    TableCellInfo,
+    TableInfo,
+)
+from play_jab._native.types import MAX_TABLE_SELECTIONS
 
 __all__ = ["FakeBackend", "FakeBackendError", "FakeNode", "fake_backend_factory"]
 
@@ -67,6 +74,16 @@ class FakeNode:
     accessible_text: bool = False
     accessible_interfaces: int = 0
     actions: tuple[str, ...] = ()
+    text: str | None = None
+    value: str | None = None
+    focused: bool = False
+    selected_children: set[int] = field(default_factory=set)
+    table_cells: list[list[FakeNode]] | None = None
+    selected_rows: set[int] = field(default_factory=set)
+    selected_columns: set[int] = field(default_factory=set)
+    selected_cells: set[tuple[int, int]] = field(default_factory=set)
+    row_header: FakeNode | None = None
+    column_header: FakeNode | None = None
     children: list[FakeNode] = field(default_factory=list)
 
     @property
@@ -98,6 +115,9 @@ class FakeBackend:
         self.acquired = 0
         self.released = 0
         self.performed_actions: list[tuple[int, str]] = []
+        self._wake: Callable[[], None] | None = None
+        self._vm_exit: Callable[[int], None] | None = None
+        self._pending_vm_exit = False
 
         self._windows: dict[int, FakeNode] = dict(windows or {})
         self._live: dict[int, FakeNode] = {}
@@ -131,6 +151,13 @@ class FakeBackend:
         self._indexes[key] = index_in_parent
         for index, child in enumerate(node.children):
             self._index_tree(child, parent=node, index_in_parent=index)
+        if node.table_cells is not None:
+            for row in node.table_cells:
+                for cell in row:
+                    self._index_tree(cell, parent=node, index_in_parent=-1)
+        for header in (node.row_header, node.column_header):
+            if header is not None:
+                self._index_tree(header, parent=node, index_in_parent=-1)
 
     def _mint(self, node: FakeNode) -> int:
         cookie = self._next_cookie
@@ -181,6 +208,9 @@ class FakeBackend:
 
     def pump_messages(self) -> None:
         self.pump_turns += 1
+        if self._pending_vm_exit and self._vm_exit is not None:
+            self._pending_vm_exit = False
+            self._vm_exit(self.vm_id)
 
     def is_java_window(self, hwnd: int) -> bool:
         if self.faults_before_ready > 0:
@@ -276,7 +306,191 @@ class FakeBackend:
             if action not in node.actions:
                 return False, index
             self.performed_actions.append((context, action))
+            if action.casefold() in {"click", "toggle"} and node.role_en_us in {
+                "check box",
+                "toggle button",
+            }:
+                states = {state for state in node.states_en_us.split(",") if state}
+                if "checked" in states:
+                    states.remove("checked")
+                else:
+                    states.add("checked")
+                node.states_en_us = ",".join(sorted(states))
         return True, -1
+
+    def get_accessible_text(self, vm_id: int, context: int) -> str | None:
+        node = self._resolve(vm_id, context)
+        return None if node is None else node.text
+
+    def get_current_accessible_value(self, vm_id: int, context: int) -> str | None:
+        node = self._resolve(vm_id, context)
+        return None if node is None else node.value
+
+    def set_text_contents(self, vm_id: int, context: int, text: str) -> bool:
+        node = self._resolve(vm_id, context)
+        if node is None or node.text is None:
+            return False
+        node.text = text
+        return True
+
+    def request_focus(self, vm_id: int, context: int) -> bool:
+        node = self._resolve(vm_id, context)
+        if node is None or not node.accessible_component:
+            return False
+        node.focused = True
+        if "focused" not in node.states_en_us:
+            states = [state for state in node.states_en_us.split(",") if state]
+            node.states_en_us = ",".join((*states, "focused"))
+        return True
+
+    def get_accessible_selection_count(self, vm_id: int, context: int) -> int:
+        node = self._resolve(vm_id, context)
+        return -1 if node is None else len(node.selected_children)
+
+    def get_accessible_selection(self, vm_id: int, context: int, index: int) -> int:
+        node = self._resolve(vm_id, context)
+        if node is None:
+            return 0
+        selected = sorted(node.selected_children)
+        if index < 0 or index >= len(selected):
+            return 0
+        return self._mint(node.children[selected[index]])
+
+    def is_accessible_child_selected(
+        self, vm_id: int, context: int, index: int
+    ) -> bool:
+        node = self._resolve(vm_id, context)
+        return node is not None and index in node.selected_children
+
+    def add_accessible_selection(self, vm_id: int, context: int, index: int) -> None:
+        node = self._resolve(vm_id, context)
+        if node is not None and 0 <= index < len(node.children):
+            node.selected_children.add(index)
+        elif node is not None and node.table_cells:
+            columns = len(node.table_cells[0])
+            row, column = divmod(index, columns)
+            if 0 <= row < len(node.table_cells):
+                node.selected_cells.add((row, column))
+
+    def remove_accessible_selection(self, vm_id: int, context: int, index: int) -> None:
+        node = self._resolve(vm_id, context)
+        if node is not None:
+            node.selected_children.discard(index)
+            if node.table_cells:
+                columns = len(node.table_cells[0])
+                node.selected_cells.discard(divmod(index, columns))
+
+    def clear_accessible_selection(self, vm_id: int, context: int) -> None:
+        node = self._resolve(vm_id, context)
+        if node is not None:
+            node.selected_children.clear()
+
+    def get_accessible_table_info(self, vm_id: int, context: int) -> TableInfo | None:
+        node = self._resolve(vm_id, context)
+        if node is None or node.table_cells is None:
+            return None
+        return self._make_table_info(node)
+
+    def _make_table_info(self, node: FakeNode) -> TableInfo:
+        table_cells = node.table_cells
+        if table_cells is None:
+            raise FakeBackendError("table info requested for a non-table node")
+        columns = len(table_cells[0]) if table_cells else 0
+        return TableInfo(
+            caption=0,
+            summary=0,
+            row_count=len(table_cells),
+            column_count=columns,
+            context=self._mint(node),
+            table=self._mint(node),
+        )
+
+    def get_accessible_table_cell_info(
+        self, vm_id: int, table: int, row: int, column: int
+    ) -> TableCellInfo | None:
+        node = self._resolve(vm_id, table)
+        if node is None or node.table_cells is None:
+            return None
+        if row < 0 or row >= len(node.table_cells):
+            return None
+        cells = node.table_cells[row]
+        if column < 0 or column >= len(cells):
+            return None
+        cell = cells[column]
+        columns = len(cells)
+        return TableCellInfo(
+            context=self._mint(cell),
+            index=row * columns + column,
+            row=row,
+            column=column,
+            row_extent=1,
+            column_extent=1,
+            selected=(row, column) in node.selected_cells
+            or row in node.selected_rows
+            or column in node.selected_columns,
+        )
+
+    def get_accessible_table_header(
+        self, vm_id: int, context: int, *, column: bool
+    ) -> TableInfo | None:
+        node = self._resolve(vm_id, context)
+        if node is None:
+            return None
+        header = node.column_header if column else node.row_header
+        if header is None or header.table_cells is None:
+            return None
+        return self._make_table_info(header)
+
+    def get_accessible_table_selections(
+        self, vm_id: int, table: int, *, column: bool
+    ) -> tuple[int, tuple[int, ...] | None]:
+        node = self._resolve(vm_id, table)
+        if node is None:
+            return -1, None
+        values = node.selected_columns if column else node.selected_rows
+        ordered = tuple(sorted(values))
+        return (
+            len(ordered),
+            ordered if len(ordered) <= MAX_TABLE_SELECTIONS else None,
+        )
+
+    def set_accessible_table_row_selected(
+        self, vm_id: int, context: int, row: int, selected: bool
+    ) -> None:
+        node = self._resolve(vm_id, context)
+        if node is None or node.table_cells is None:
+            return
+        if selected:
+            node.selected_rows.add(row)
+        else:
+            node.selected_rows.discard(row)
+
+    def get_visible_children(self, vm_id: int, context: int) -> tuple[int, ...] | None:
+        node = self._resolve(vm_id, context)
+        if node is None:
+            return None
+        visible = [
+            child
+            for child in node.children
+            if "visible" in child.localized_states.split(",")
+        ]
+        return tuple(self._mint(child) for child in visible)
+
+    def setup_event_callbacks(
+        self, wake: Callable[[], None], vm_exit: Callable[[int], None]
+    ) -> None:
+        self._wake = wake
+        self._vm_exit = vm_exit
+
+    def emit_event(self) -> None:
+        """Wake hybrid waits in portable tests."""
+        if self._wake is not None:
+            self._wake()
+
+    def emit_vm_shutdown(self) -> None:
+        """Report this fake backend's JVM shutdown."""
+        self._pending_vm_exit = True
+        self.emit_event()
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1

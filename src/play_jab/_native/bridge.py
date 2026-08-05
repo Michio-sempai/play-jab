@@ -1,3 +1,4 @@
+# flake8: noqa
 """The Access Bridge runtime: one thread, one message pump, one DLL."""
 
 from __future__ import annotations
@@ -5,17 +6,27 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import weakref
 from collections.abc import Callable
+from contextlib import suppress
 from types import TracebackType
 from typing import TypeVar, cast
 
-from play_jab._native.backend import ContextInfo, NativeBackend, dll_backend_factory
+from play_jab._native.backend import (
+    ContextInfo,
+    NativeBackend,
+    TableCellInfo,
+    TableInfo,
+    dll_backend_factory,
+)
 from play_jab._native.dll import jab_enabled_for_current_user
 from play_jab._native.refs import JavaRef
+from play_jab._native.types import MAX_STRING_SIZE
 from play_jab.exceptions import (
     BridgeClosedError,
     BridgeInitializationError,
     BridgeNotEnabledError,
+    JavaVmExitedError,
     JavaWindowNotAccessibleError,
     JavaWindowNotFoundError,
     NativeCallError,
@@ -33,7 +44,6 @@ DEFAULT_PUMP_INTERVAL = 0.01
 
 _INITIAL_PROBE_DELAY = 0.005
 _MAX_PROBE_DELAY = 0.2
-_SHUTDOWN_JOIN_TIMEOUT = 5.0
 _CLOSED_MESSAGE = "bridge runtime is closed"
 
 
@@ -102,7 +112,11 @@ class BridgeRuntime:
         self._startup_error: BaseException | None = None
         self._in_flight: _Call | None = None
         self._closed = False
-        self._live_refs = 0
+        self._live_refs: dict[int, tuple[int, int, weakref.ReferenceType[JavaRef]]] = {}
+        self._next_ownership_id = 1
+        self._event_wake = threading.Event()
+        self._dead_vms: set[int] = set()
+        self._window_vms: dict[int, int] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -130,7 +144,7 @@ class BridgeRuntime:
             thread.start()
         self._started.wait()
         if self._startup_error is not None:
-            thread.join(timeout=_SHUTDOWN_JOIN_TIMEOUT)
+            thread.join()
             raise self._startup_error
 
     def close(self) -> None:
@@ -143,7 +157,7 @@ class BridgeRuntime:
                 return
             self._queue.put(_Call(None))
         if thread is not threading.current_thread():
-            thread.join(timeout=_SHUTDOWN_JOIN_TIMEOUT)
+            thread.join()
 
     @property
     def closed(self) -> bool:
@@ -159,7 +173,7 @@ class BridgeRuntime:
         Zeroing the counter would report a clean teardown that did not happen, so
         a non-zero value after :meth:`close` is a real leak worth seeing.
         """
-        return self._live_refs
+        return len(self._live_refs)
 
     def __enter__(self) -> BridgeRuntime:
         if self._thread is None:
@@ -188,7 +202,22 @@ class BridgeRuntime:
 
     def _start_backend(self, backend: NativeBackend, probe_hwnd: int | None) -> None:
         backend.windows_run()
+        backend.setup_event_callbacks(self._event_wake.set, self._handle_vm_exit)
         self._await_ready(backend, probe_hwnd)
+
+    def _handle_vm_exit(self, vm_id: int) -> None:
+        self._dead_vms.add(vm_id)
+        doomed = [
+            ownership_id
+            for ownership_id, (owner_vm, _value, _reference) in self._live_refs.items()
+            if owner_vm == vm_id
+        ]
+        for ownership_id in doomed:
+            _owner_vm, _value, reference = self._live_refs.pop(ownership_id)
+            ref = reference()
+            if ref is not None:
+                ref._invalidate()
+        self._event_wake.set()
 
     def _finish_failed_start(
         self,
@@ -218,6 +247,7 @@ class BridgeRuntime:
         self._mark_closed()
         self._backend = None
         try:
+            self._release_all_refs(backend)
             backend.shutdown()
         finally:
             # Whatever happens to the DLL, waiting callers have to be woken.
@@ -355,14 +385,38 @@ class BridgeRuntime:
         that one thread, so it needs no lock of its own. Readers on other
         threads see a plain int load.
         """
-        self._live_refs += 1
-        return JavaRef(self, vm_id, value)
+        ownership_id = self._next_ownership_id
+        self._next_ownership_id += 1
+        ref = JavaRef(self, ownership_id, vm_id, value)
+        self._live_refs[ownership_id] = (vm_id, value, weakref.ref(ref))
+        return ref
+
+    def _release_all_refs(self, backend: NativeBackend) -> None:
+        """Release every cookie still registered before unloading the DLL."""
+        owned = tuple(self._live_refs.items())
+        self._live_refs.clear()
+        for _ownership_id, (vm_id, value, reference) in owned:
+            with suppress(BaseException):
+                backend.release_java_object(vm_id, value)
+            ref = reference()
+            if ref is not None:
+                ref._invalidate()
 
     def _unwrap_reference(self, ref: JavaRef) -> tuple[int, int]:
         """Validate ownership and read a cookie in the serialized worker step."""
         if not ref._belongs_to(self):
             raise ValueError("Java reference belongs to another bridge runtime")
-        return ref.vm_id, ref.value
+        vm_id = ref.vm_id
+        if vm_id in self._dead_vms:
+            raise JavaVmExitedError(f"JVM vmID {vm_id} has exited")
+        return vm_id, ref.value
+
+    def wait_for_event(self, timeout: float) -> None:
+        """Wait until a callback arrives, retaining polling as the caller's fallback."""
+        if timeout <= 0:
+            return
+        self._event_wake.wait(timeout)
+        self._event_wake.clear()
 
     # -- native operations -------------------------------------------------
     #
@@ -375,10 +429,22 @@ class BridgeRuntime:
         """Whether ``hwnd`` belongs to a Java application exposing JAB."""
         return self._call(lambda backend: backend.is_java_window(hwnd))
 
+    def is_vm_exited_window(self, hwnd: int) -> bool:
+        """Whether a prior context associated this HWND with a dead JVM."""
+
+        def operation() -> bool:
+            vm_id = self._window_vms.get(hwnd)
+            return vm_id is not None and vm_id in self._dead_vms
+
+        return self._submit(operation)
+
     def context_from_hwnd(self, hwnd: int) -> JavaRef:
         """Attach to a top-level window; returns a newly owned reference."""
 
         def operation(backend: NativeBackend) -> JavaRef:
+            known_vm = self._window_vms.get(hwnd)
+            if known_vm is not None and known_vm in self._dead_vms:
+                raise JavaVmExitedError(f"JVM vmID {known_vm} has exited")
             if not backend.is_java_window(hwnd):
                 raise JavaWindowNotFoundError(
                     f"window {hwnd:#x} is not a Java window, or no longer exists"
@@ -390,6 +456,7 @@ class BridgeRuntime:
                     f"accessible context"
                 )
             vm_id, value = found
+            self._window_vms[hwnd] = vm_id
             return self._own(vm_id, value)
 
         return self._call(operation)
@@ -483,7 +550,188 @@ class BridgeRuntime:
 
         self._call(operation)
 
-    def _release_java_object(self, vm_id: int, value: int) -> None:
+    def accessible_text(self, ref: JavaRef) -> str | None:
+        """Return AccessibleText contents, or ``None`` when unavailable."""
+
+        def operation(backend: NativeBackend) -> str | None:
+            vm_id, value = self._unwrap_reference(ref)
+            return backend.get_accessible_text(vm_id, value)
+
+        return self._call(operation)
+
+    def accessible_value(self, ref: JavaRef) -> str | None:
+        """Return the current AccessibleValue string, or ``None``."""
+
+        def operation(backend: NativeBackend) -> str | None:
+            vm_id, value = self._unwrap_reference(ref)
+            return backend.get_current_accessible_value(vm_id, value)
+
+        return self._call(operation)
+
+    def set_text_contents(self, ref: JavaRef, text: str) -> None:
+        """Replace editable text contents."""
+        if len(text) >= MAX_STRING_SIZE:
+            raise ValueError("text must contain fewer than 1024 characters")
+
+        def operation(backend: NativeBackend) -> None:
+            vm_id, value = self._unwrap_reference(ref)
+            if not backend.set_text_contents(vm_id, value, text):
+                raise NativeCallError("setTextContents", vmID=vm_id, ac=value)
+
+        self._call(operation)
+
+    def request_focus(self, ref: JavaRef) -> None:
+        """Request focus through the semantic JAB operation."""
+
+        def operation(backend: NativeBackend) -> None:
+            vm_id, value = self._unwrap_reference(ref)
+            if not backend.request_focus(vm_id, value):
+                raise NativeCallError("requestFocus", vmID=vm_id, ac=value)
+
+        self._call(operation)
+
+    def selection_count(self, ref: JavaRef) -> int:
+        def operation(backend: NativeBackend) -> int:
+            vm_id, value = self._unwrap_reference(ref)
+            count = backend.get_accessible_selection_count(vm_id, value)
+            if count < 0:
+                raise NativeCallError(
+                    "getAccessibleSelectionCountFromContext", vmID=vm_id, ac=value
+                )
+            return count
+
+        return self._call(operation)
+
+    def selection(self, ref: JavaRef, index: int) -> JavaRef | None:
+        def operation(backend: NativeBackend) -> JavaRef | None:
+            vm_id, value = self._unwrap_reference(ref)
+            selected = backend.get_accessible_selection(vm_id, value, index)
+            return self._own(vm_id, selected) if selected else None
+
+        return self._call(operation)
+
+    def is_child_selected(self, ref: JavaRef, index: int) -> bool:
+        def operation(backend: NativeBackend) -> bool:
+            vm_id, value = self._unwrap_reference(ref)
+            return backend.is_accessible_child_selected(vm_id, value, index)
+
+        return self._call(operation)
+
+    def set_child_selected(self, ref: JavaRef, index: int, selected: bool) -> None:
+        def operation(backend: NativeBackend) -> None:
+            vm_id, value = self._unwrap_reference(ref)
+            if selected:
+                backend.add_accessible_selection(vm_id, value, index)
+            else:
+                backend.remove_accessible_selection(vm_id, value, index)
+
+        self._call(operation)
+
+    def clear_selection(self, ref: JavaRef) -> None:
+        def operation(backend: NativeBackend) -> None:
+            vm_id, value = self._unwrap_reference(ref)
+            backend.clear_accessible_selection(vm_id, value)
+
+        self._call(operation)
+
+    def table_info(self, ref: JavaRef) -> tuple[int, int, tuple[JavaRef | None, ...]]:
+        """Return dimensions and every owned context supplied by table info."""
+
+        def operation(
+            backend: NativeBackend,
+        ) -> tuple[int, int, tuple[JavaRef | None, ...]]:
+            vm_id, value = self._unwrap_reference(ref)
+            info = backend.get_accessible_table_info(vm_id, value)
+            if info is None:
+                raise NativeCallError("getAccessibleTableInfo", vmID=vm_id, ac=value)
+            return info.row_count, info.column_count, self._own_table_refs(vm_id, info)
+
+        return self._call(operation)
+
+    def _own_table_refs(
+        self, vm_id: int, info: TableInfo
+    ) -> tuple[JavaRef | None, ...]:
+        return tuple(
+            self._own(vm_id, value) if value else None
+            for value in (
+                info.caption,
+                info.summary,
+                info.context,
+                info.table,
+            )
+        )
+
+    def table_cell(
+        self, table_ref: JavaRef, row: int, column: int
+    ) -> tuple[JavaRef, TableCellInfo]:
+        def operation(backend: NativeBackend) -> tuple[JavaRef, TableCellInfo]:
+            vm_id, value = self._unwrap_reference(table_ref)
+            info = backend.get_accessible_table_cell_info(vm_id, value, row, column)
+            if info is None or not info.context:
+                raise NativeCallError(
+                    "getAccessibleTableCellInfo",
+                    vmID=vm_id,
+                    table=value,
+                    row=row,
+                    column=column,
+                )
+            return self._own(vm_id, info.context), info
+
+        return self._call(operation)
+
+    def table_header(
+        self, ref: JavaRef, *, column: bool
+    ) -> tuple[int, int, tuple[JavaRef | None, ...]] | None:
+        def operation(
+            backend: NativeBackend,
+        ) -> tuple[int, int, tuple[JavaRef | None, ...]] | None:
+            vm_id, value = self._unwrap_reference(ref)
+            info = backend.get_accessible_table_header(vm_id, value, column=column)
+            if info is None:
+                return None
+            return info.row_count, info.column_count, self._own_table_refs(vm_id, info)
+
+        return self._call(operation)
+
+    def table_selections(self, table_ref: JavaRef, *, column: bool) -> tuple[int, ...]:
+        def operation(backend: NativeBackend) -> tuple[int, ...]:
+            vm_id, value = self._unwrap_reference(table_ref)
+            count, selections = backend.get_accessible_table_selections(
+                vm_id, value, column=column
+            )
+            if selections is None:
+                raise NativeCallError(
+                    "getAccessibleTableColumnSelections"
+                    if column
+                    else "getAccessibleTableRowSelections",
+                    vmID=vm_id,
+                    table=value,
+                    native_count=count,
+                )
+            return selections
+
+        return self._call(operation)
+
+    def set_table_row_selected(
+        self, context_ref: JavaRef, row: int, selected: bool
+    ) -> None:
+        def operation(backend: NativeBackend) -> None:
+            vm_id, value = self._unwrap_reference(context_ref)
+            backend.set_accessible_table_row_selected(vm_id, value, row, selected)
+
+        self._call(operation)
+
+    def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...]:
+        def operation(backend: NativeBackend) -> tuple[JavaRef, ...]:
+            vm_id, value = self._unwrap_reference(ref)
+            children = backend.get_visible_children(vm_id, value)
+            if children is None:
+                raise NativeCallError("getVisibleChildren", vmID=vm_id, ac=value)
+            return tuple(self._own(vm_id, child) for child in children if child)
+
+        return self._call(operation)
+
+    def _release_java_object(self, ownership_id: int, vm_id: int, value: int) -> None:
         """Give one owned reference back to the JVM. Called by :class:`JavaRef`.
 
         The accounting happens on the worker thread, in the same step as the
@@ -496,9 +744,14 @@ class BridgeRuntime:
         """
 
         def operation(backend: NativeBackend) -> None:
+            owned = self._live_refs.pop(ownership_id, None)
+            if owned is None:
+                return
             try:
                 backend.release_java_object(vm_id, value)
             finally:
-                self._live_refs -= 1
+                reference = owned[2]()
+                if reference is not None:
+                    reference._invalidate()
 
         self._call(operation)

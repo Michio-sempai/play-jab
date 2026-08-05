@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 
 import pytest
 
@@ -25,11 +24,6 @@ DUPLICATE_COUNT = 2
 BUTTON_COUNT = 3
 
 
-@dataclass(frozen=True)
-class _Handle:
-    pid: int
-
-
 class _Windows:
     def enum_windows(self) -> list[int]:
         return [HWND]
@@ -41,14 +35,6 @@ class _Windows:
     def get_window_pid(self, hwnd: int) -> int:
         assert hwnd == HWND
         return PID
-
-
-class _Processes:
-    def launch(self, command: object, *, cwd: object, env: object) -> _Handle:
-        return _Handle(PID)
-
-    def is_alive(self, pid: int) -> bool:
-        return pid == PID
 
 
 def _tree() -> FakeNode:
@@ -112,7 +98,7 @@ def locator_api(
     runtime = BridgeRuntime(lambda: backend)
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", _Windows)
-    monkeypatch.setattr(sync_api, "_create_process_backend", _Processes)
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
     api = PlayJab(timeout=0)
     api.__enter__()
     window = api.attach(pid=PID).window()
@@ -349,8 +335,8 @@ def test_wait_for_polls_at_one_hundred_milliseconds_until_attached(
     locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api, window, _, backend = locator_api
-    api._timeout = 1_000
+    _, window, runtime, backend = locator_api
+    window._timeout = 1_000
     root = backend._windows[HWND]
     target = root.children[0].children[1]
     root.children[0].children.remove(target)
@@ -360,7 +346,7 @@ def test_wait_for_polls_at_one_hundred_milliseconds_until_attached(
         delays.append(delay)
         root.children[0].children.append(target)
 
-    monkeypatch.setattr(sync_api.time, "sleep", reveal)
+    monkeypatch.setattr(runtime, "wait_for_event", reveal)
     window.get_by_name("Disabled").wait_for(state="attached")
     assert delays == [pytest.approx(0.1)]
 
@@ -376,7 +362,7 @@ def test_wait_for_detached_re_resolves_instead_of_holding_a_cookie(
     def remove(_delay: float) -> None:
         root.children[0].children.remove(target)
 
-    monkeypatch.setattr(sync_api.time, "sleep", remove)
+    monkeypatch.setattr(runtime, "wait_for_event", remove)
     window.get_by_name("Disabled").wait_for(state="detached", timeout=1_000)
     assert runtime.live_ref_count == 0
     assert backend.live_cookies == frozenset()
@@ -447,7 +433,7 @@ def _window_for_backend(
     runtime = BridgeRuntime(lambda: backend)
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", _Windows)
-    monkeypatch.setattr(sync_api, "_create_process_backend", _Processes)
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
     api = PlayJab(timeout=0)
     api.__enter__()
     return api, api.attach(pid=PID).window(), runtime

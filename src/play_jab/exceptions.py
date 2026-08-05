@@ -13,6 +13,7 @@ __all__ = [
     "BridgeNotEnabledError",
     "JavaProcessExitedError",
     "JavaReferenceClosedError",
+    "JavaVmExitedError",
     "JavaWindowAmbiguousError",
     "JavaWindowNotAccessibleError",
     "JavaWindowNotFoundError",
@@ -21,6 +22,7 @@ __all__ = [
     "NativeCallError",
     "PlayJabError",
     "StrictModeViolation",
+    "TableIndexError",
     "UnsupportedAccessibleRoleError",
     "UnsupportedAccessibleStateError",
     "UnsupportedActionError",
@@ -80,6 +82,10 @@ class JavaProcessExitedError(PlayJabError):
     """The Java process exited before the requested operation completed."""
 
 
+class JavaVmExitedError(PlayJabError):
+    """The attached JVM shut down while its operating-system process survived."""
+
+
 class JavaWindowAmbiguousError(PlayJabError):
     """More than one Java window satisfies a strict window query."""
 
@@ -98,6 +104,10 @@ class LocatorTimeoutError(LocatorError):
 
 class UnsupportedActionError(LocatorError):
     """A locator target does not expose a suitable accessible action."""
+
+
+class TableIndexError(LocatorError, IndexError):
+    """A zero-based table row or column is outside the current dimensions."""
 
 
 class UnsupportedAccessibleRoleError(PlayJabError, ValueError):

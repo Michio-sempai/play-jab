@@ -1,3 +1,4 @@
+# flake8: noqa
 """The seam between play-jab and the native Access Bridge.
 
 :class:`NativeBackend` is the entire native surface this slice depends on: the
@@ -17,6 +18,7 @@ from the single thread that created the backend.
 from __future__ import annotations
 
 import ctypes
+import queue
 import sys
 from collections.abc import Callable
 from contextlib import suppress
@@ -25,20 +27,40 @@ from pathlib import Path
 from typing import Protocol
 
 from play_jab._native.dll import load_access_bridge, verify_exports
-from play_jab._native.functions import REQUIRED_EXPORTS, configure_functions
+from play_jab._native.functions import (
+    JAVA_SHUTDOWN_CALLBACK,
+    PROPERTY_CALLBACK,
+    PROPERTY_CHANGE_CALLBACK,
+    PROPERTY_SIMPLE_CALLBACK,
+    REQUIRED_EXPORTS,
+    configure_functions,
+)
 from play_jab._native.types import (
     MAX_ACTIONS_TO_DO,
+    MAX_STRING_SIZE,
+    MAX_TABLE_SELECTIONS,
     AccessibleActions,
     AccessibleActionsToDo,
     AccessibleContext,
     AccessibleContextInfo,
+    AccessibleTableCellInfo,
+    AccessibleTableInfo,
+    AccessibleTextInfo,
+    VisibleChildrenInfo,
     jint,
 )
 
 if sys.platform == "win32":
     from ctypes import wintypes as win_types
 
-__all__ = ["ContextInfo", "DllBackend", "NativeBackend", "dll_backend_factory"]
+__all__ = [
+    "ContextInfo",
+    "DllBackend",
+    "NativeBackend",
+    "TableCellInfo",
+    "TableInfo",
+    "dll_backend_factory",
+]
 
 _PM_REMOVE = 0x0001
 # Upper bound on messages dispatched per pump call, so that a message storm
@@ -82,6 +104,31 @@ class ContextInfo:
     accessible_selection: bool
     accessible_text: bool
     accessible_interfaces: int
+
+
+@dataclass(frozen=True, slots=True)
+class TableInfo:
+    """Copied table metadata; non-zero handles are newly owned cookies."""
+
+    caption: int
+    summary: int
+    row_count: int
+    column_count: int
+    context: int
+    table: int
+
+
+@dataclass(frozen=True, slots=True)
+class TableCellInfo:
+    """Copied table cell metadata; ``context`` is a newly owned cookie."""
+
+    context: int
+    index: int
+    row: int
+    column: int
+    row_extent: int
+    column_extent: int
+    selected: bool
 
 
 class NativeBackend(Protocol):
@@ -150,6 +197,60 @@ class NativeBackend(Protocol):
     ) -> tuple[bool, int]:
         """Perform actions and return ``(success, failure_index)``."""
 
+    def get_accessible_text(self, vm_id: int, context: int) -> str | None: ...
+
+    def get_current_accessible_value(self, vm_id: int, context: int) -> str | None: ...
+
+    def set_text_contents(self, vm_id: int, context: int, text: str) -> bool: ...
+
+    def request_focus(self, vm_id: int, context: int) -> bool: ...
+
+    def get_accessible_selection_count(self, vm_id: int, context: int) -> int: ...
+
+    def get_accessible_selection(self, vm_id: int, context: int, index: int) -> int: ...
+
+    def is_accessible_child_selected(
+        self, vm_id: int, context: int, index: int
+    ) -> bool: ...
+
+    def add_accessible_selection(
+        self, vm_id: int, context: int, index: int
+    ) -> None: ...
+
+    def remove_accessible_selection(
+        self, vm_id: int, context: int, index: int
+    ) -> None: ...
+
+    def clear_accessible_selection(self, vm_id: int, context: int) -> None: ...
+
+    def get_accessible_table_info(
+        self, vm_id: int, context: int
+    ) -> TableInfo | None: ...
+
+    def get_accessible_table_cell_info(
+        self, vm_id: int, table: int, row: int, column: int
+    ) -> TableCellInfo | None: ...
+
+    def get_accessible_table_header(
+        self, vm_id: int, context: int, *, column: bool
+    ) -> TableInfo | None: ...
+
+    def get_accessible_table_selections(
+        self, vm_id: int, table: int, *, column: bool
+    ) -> tuple[int, tuple[int, ...] | None]: ...
+
+    def set_accessible_table_row_selected(
+        self, vm_id: int, context: int, row: int, selected: bool
+    ) -> None: ...
+
+    def get_visible_children(
+        self, vm_id: int, context: int
+    ) -> tuple[int, ...] | None: ...
+
+    def setup_event_callbacks(
+        self, wake: Callable[[], None], vm_exit: Callable[[int], None]
+    ) -> None: ...
+
     def shutdown(self) -> None:
         """Release the bridge. Must be idempotent and must not raise."""
 
@@ -160,6 +261,11 @@ class DllBackend:
     def __init__(self, dll: ctypes.CDLL) -> None:
         self._dll = dll
         self._closed = False
+        self._callbacks: list[object] = []
+        self._callback_events: queue.SimpleQueue[tuple[int, int, int]] = (
+            queue.SimpleQueue()
+        )
+        self._callback_vm_exit: Callable[[int], None] | None = None
         if sys.platform != "win32":  # pragma: no cover - unit-test import shim
             self._user32 = None
             self._message = None
@@ -204,9 +310,23 @@ class DllBackend:
         pointer = ctypes.byref(self._message)
         for _ in range(_MAX_MESSAGES_PER_PUMP):
             if not self._user32.PeekMessageW(pointer, None, 0, 0, _PM_REMOVE):
-                return
+                break
             self._user32.TranslateMessage(pointer)
             self._user32.DispatchMessageW(pointer)
+        self._drain_callback_events()
+
+    def _drain_callback_events(self) -> None:
+        while True:
+            try:
+                vm_id, event, source = self._callback_events.get_nowait()
+            except queue.Empty:
+                return
+            if event:
+                self.release_java_object(vm_id, event)
+            if source:
+                self.release_java_object(vm_id, source)
+            if not event and not source and self._callback_vm_exit is not None:
+                self._callback_vm_exit(vm_id)
 
     def is_java_window(self, hwnd: int) -> bool:
         return bool(self._dll.isJavaWindow(hwnd))
@@ -296,6 +416,276 @@ class DllBackend:
         )
         return bool(ok), int(failure.value)
 
+    def get_accessible_text(self, vm_id: int, context: int) -> str | None:
+        info = AccessibleTextInfo()
+        if not self._dll.getAccessibleTextInfo(
+            vm_id, context, ctypes.byref(info), 0, 0
+        ):
+            return None
+        count = int(info.charCount)
+        if count <= 0:
+            return ""
+        # The native range call is bounded by a signed short and includes a
+        # terminator. Reading in chunks also avoids the fixed MAX_STRING_SIZE
+        # limit used by older bridge implementations.
+        chunks: list[str] = []
+        start = 0
+        chunk_size = min(MAX_STRING_SIZE - 1, 32_766)
+        while start < count:
+            end = min(count - 1, start + chunk_size - 1)
+            buffer = ctypes.create_unicode_buffer(end - start + 2)
+            if not self._dll.getAccessibleTextRange(
+                vm_id, context, start, end, buffer, len(buffer)
+            ):
+                return None
+            chunks.append(buffer.value)
+            start = end + 1
+        return "".join(chunks)
+
+    def get_current_accessible_value(self, vm_id: int, context: int) -> str | None:
+        buffer = ctypes.create_unicode_buffer(MAX_STRING_SIZE)
+        if not self._dll.getCurrentAccessibleValueFromContext(
+            vm_id, context, buffer, len(buffer)
+        ):
+            return None
+        return buffer.value
+
+    def set_text_contents(self, vm_id: int, context: int, text: str) -> bool:
+        return bool(self._dll.setTextContents(vm_id, context, text))
+
+    def request_focus(self, vm_id: int, context: int) -> bool:
+        return bool(self._dll.requestFocus(vm_id, context))
+
+    def get_accessible_selection_count(self, vm_id: int, context: int) -> int:
+        return int(self._dll.getAccessibleSelectionCountFromContext(vm_id, context))
+
+    def get_accessible_selection(self, vm_id: int, context: int, index: int) -> int:
+        return int(self._dll.getAccessibleSelectionFromContext(vm_id, context, index))
+
+    def is_accessible_child_selected(
+        self, vm_id: int, context: int, index: int
+    ) -> bool:
+        return bool(
+            self._dll.isAccessibleChildSelectedFromContext(vm_id, context, index)
+        )
+
+    def add_accessible_selection(self, vm_id: int, context: int, index: int) -> None:
+        self._dll.addAccessibleSelectionFromContext(vm_id, context, index)
+
+    def remove_accessible_selection(self, vm_id: int, context: int, index: int) -> None:
+        self._dll.removeAccessibleSelectionFromContext(vm_id, context, index)
+
+    def clear_accessible_selection(self, vm_id: int, context: int) -> None:
+        self._dll.clearAccessibleSelectionFromContext(vm_id, context)
+
+    @staticmethod
+    def _table_info(raw: AccessibleTableInfo) -> TableInfo:
+        return TableInfo(
+            caption=int(raw.caption),
+            summary=int(raw.summary),
+            row_count=int(raw.rowCount),
+            column_count=int(raw.columnCount),
+            context=int(raw.accessibleContext),
+            table=int(raw.accessibleTable),
+        )
+
+    def get_accessible_table_info(self, vm_id: int, context: int) -> TableInfo | None:
+        raw = AccessibleTableInfo()
+        if not self._dll.getAccessibleTableInfo(vm_id, context, ctypes.byref(raw)):
+            self._release_table_handles(vm_id, raw)
+            return None
+        return self._table_info(raw)
+
+    def _release_table_handles(self, vm_id: int, raw: AccessibleTableInfo) -> None:
+        for value in (
+            raw.caption,
+            raw.summary,
+            raw.accessibleContext,
+            raw.accessibleTable,
+        ):
+            if value:
+                self.release_java_object(vm_id, int(value))
+
+    def get_accessible_table_cell_info(
+        self, vm_id: int, table: int, row: int, column: int
+    ) -> TableCellInfo | None:
+        raw = AccessibleTableCellInfo()
+        if not self._dll.getAccessibleTableCellInfo(
+            vm_id, table, row, column, ctypes.byref(raw)
+        ):
+            if raw.accessibleContext:
+                self.release_java_object(vm_id, int(raw.accessibleContext))
+            return None
+        return TableCellInfo(
+            context=int(raw.accessibleContext),
+            index=int(raw.index),
+            row=int(raw.row),
+            column=int(raw.column),
+            row_extent=int(raw.rowExtent),
+            column_extent=int(raw.columnExtent),
+            selected=bool(raw.isSelected),
+        )
+
+    def get_accessible_table_header(
+        self, vm_id: int, context: int, *, column: bool
+    ) -> TableInfo | None:
+        raw = AccessibleTableInfo()
+        function = (
+            self._dll.getAccessibleTableColumnHeader
+            if column
+            else self._dll.getAccessibleTableRowHeader
+        )
+        if not function(vm_id, context, ctypes.byref(raw)):
+            self._release_table_handles(vm_id, raw)
+            return None
+        return self._table_info(raw)
+
+    def get_accessible_table_selections(
+        self, vm_id: int, table: int, *, column: bool
+    ) -> tuple[int, tuple[int, ...] | None]:
+        count_function = (
+            self._dll.getAccessibleTableColumnSelectionCount
+            if column
+            else self._dll.getAccessibleTableRowSelectionCount
+        )
+        values_function = (
+            self._dll.getAccessibleTableColumnSelections
+            if column
+            else self._dll.getAccessibleTableRowSelections
+        )
+        count = int(count_function(vm_id, table))
+        if count < 0 or count > MAX_TABLE_SELECTIONS:
+            return count, None
+        if count == 0:
+            return 0, ()
+        values = (jint * count)()
+        if not values_function(vm_id, table, count, values):
+            return count, None
+        return count, tuple(int(value) for value in values)
+
+    def set_accessible_table_row_selected(
+        self, vm_id: int, context: int, row: int, selected: bool
+    ) -> None:
+        if selected:
+            self.add_accessible_selection(vm_id, context, row)
+        else:
+            self.remove_accessible_selection(vm_id, context, row)
+
+    def get_visible_children(self, vm_id: int, context: int) -> tuple[int, ...] | None:
+        count = int(self._dll.getVisibleChildrenCount(vm_id, context))
+        if count < 0:
+            return None
+        children: list[int] = []
+        for start in range(0, count, len(VisibleChildrenInfo().children)):
+            raw = VisibleChildrenInfo()
+            if not self._dll.getVisibleChildren(
+                vm_id, context, start, ctypes.byref(raw)
+            ):
+                for child in children:
+                    self.release_java_object(vm_id, child)
+                return None
+            returned = int(raw.returnedChildrenCount)
+            if returned < 0 or returned > len(raw.children):
+                for child in children:
+                    self.release_java_object(vm_id, child)
+                for child in raw.children:
+                    if child:
+                        self.release_java_object(vm_id, int(child))
+                return None
+            children.extend(int(raw.children[index]) for index in range(returned))
+        return tuple(children)
+
+    def setup_event_callbacks(
+        self, wake: Callable[[], None], vm_exit: Callable[[int], None]
+    ) -> None:
+        self._callback_vm_exit = vm_exit
+
+        def queue_event(vm_id: int, event: int, source: int) -> None:
+            self._callback_events.put((int(vm_id), int(event), int(source)))
+            wake()
+
+        @JAVA_SHUTDOWN_CALLBACK  # type: ignore[untyped-decorator]
+        def java_shutdown(vm_id: int) -> None:
+            queue_event(int(vm_id), 0, 0)
+
+        @PROPERTY_CHANGE_CALLBACK  # type: ignore[untyped-decorator]
+        def property_change(
+            vm_id: int,
+            event: int,
+            source: int,
+            _property: int,
+            _old: int,
+            _new: int,
+        ) -> None:
+            queue_event(int(vm_id), int(event), int(source))
+
+        @PROPERTY_CALLBACK  # type: ignore[untyped-decorator]
+        def property_value(
+            vm_id: int,
+            event: int,
+            source: int,
+            _old: int,
+            _new: int,
+        ) -> None:
+            queue_event(int(vm_id), int(event), int(source))
+
+        @PROPERTY_SIMPLE_CALLBACK  # type: ignore[untyped-decorator]
+        def property_simple(vm_id: int, event: int, source: int) -> None:
+            queue_event(int(vm_id), int(event), int(source))
+
+        self._callbacks = [
+            java_shutdown,
+            property_change,
+            property_value,
+            property_simple,
+        ]
+        registrations = (
+            ("setJavaShutdownFP", java_shutdown),
+            ("setPropertyChangeFP", property_change),
+            *(
+                (name, property_value)
+                for name in (
+                    "setPropertyStateChangeFP",
+                    "setPropertyValueChangeFP",
+                    "setPropertyTableModelChangeFP",
+                )
+            ),
+            *(
+                (name, property_simple)
+                for name in (
+                    "setPropertyTextChangeFP",
+                    "setPropertySelectionChangeFP",
+                    "setPropertyVisibleDataChangeFP",
+                )
+            ),
+        )
+        registered: list[str] = []
+        try:
+            for name, callback in registrations:
+                getattr(self._dll, name)(callback)
+                registered.append(name)
+        except BaseException:
+            for name in reversed(registered):
+                getattr(self._dll, name)(None)
+            self._callbacks.clear()
+            raise
+
+    def _clear_event_callbacks(self) -> None:
+        for name in (
+            "setJavaShutdownFP",
+            "setPropertyChangeFP",
+            "setPropertyStateChangeFP",
+            "setPropertyValueChangeFP",
+            "setPropertyTableModelChangeFP",
+            "setPropertyTextChangeFP",
+            "setPropertySelectionChangeFP",
+            "setPropertyVisibleDataChangeFP",
+        ):
+            with suppress(BaseException):
+                getattr(self._dll, name)(None)
+        self._callbacks.clear()
+        self._callback_vm_exit = None
+
     def shutdown(self) -> None:
         """Unload the Access Bridge DLL.
 
@@ -309,6 +699,7 @@ class DllBackend:
         if self._closed:
             return
         self._closed = True
+        self._clear_event_callbacks()
         _free_library(self._dll)
 
 

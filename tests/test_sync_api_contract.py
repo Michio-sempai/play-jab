@@ -46,7 +46,7 @@ def test_the_public_types_are_exported_from_sync_api() -> None:
         "extra_roles",
         "extra_states",
     )
-    assert _parameters(PlayJab.launch) == ("self", "command", "cwd", "env")
+    assert not hasattr(PlayJab, "launch")
     assert _parameters(PlayJab.attach) == (
         "self",
         "hwnd",

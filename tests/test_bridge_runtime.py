@@ -144,16 +144,14 @@ def test_calls_after_close_are_rejected() -> None:
     bridge.close()
 
     assert backend.shutdown_calls == 1
-    # Still counted: shutdown abandoned this reference rather than releasing it.
-    assert bridge.live_ref_count == 1
+    assert bridge.live_ref_count == 0
+    assert root.closed
     with pytest.raises(BridgeClosedError):
         bridge.is_java_window(WINDOW_HWND)
     with pytest.raises(BridgeClosedError):
         bridge.context_info(root)
-    # Releasing a reference whose runtime is gone is a no-op, not an error: the
-    # DLL is unloaded and every cookie for that vmID is already invalid.
     root.close()
-    assert backend.released == 0
+    assert backend.released == 1
 
 
 def test_a_stale_context_is_a_normal_outcome_not_a_crash() -> None:

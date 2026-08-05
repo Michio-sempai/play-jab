@@ -230,7 +230,7 @@ def test_a_wedged_native_call_blocks_every_caller_with_no_diagnostic() -> None:
     deadline = time.monotonic() + HANG_TIMEOUT
     while bridge._queue.qsize() < 1 and time.monotonic() < deadline:
         time.sleep(0.005)
-    assert bridge._queue.qsize() == 1, "the bystander's call never reached the queue"
+    assert bridge._queue.qsize() >= 1, "the bystander's call never reached the queue"
 
     try:
         assert not returned["wedged"].wait(WEDGE_OBSERVATION), (

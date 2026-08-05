@@ -311,24 +311,18 @@ def test_a_stale_reference_reads_as_a_diagnosable_failure(
         assert bridge.hwnd_from_context(root) is None
 
 
-def test_shutting_the_runtime_down_does_not_release_outstanding_references() -> None:
-    """Shutdown is not a release, which is why the counter must not be zeroed.
-
-    Unloading the DLL abandons every cookie the JVM is still pinning for us; the
-    objects stay alive until their VM exits. ``live_ref_count`` therefore keeps
-    reporting them after :meth:`close`, so a leak stays visible instead of being
-    papered over by a teardown that never actually gave anything back.
-    """
+def test_shutting_the_runtime_down_releases_outstanding_references() -> None:
+    """Shutdown returns every cookie before unloading the DLL."""
     backend, factory = fake_backend_factory({WINDOW_HWND: nested_tree()})
     bridge = BridgeRuntime(factory, pump_interval=0.001)
     bridge.start()
     leaked = bridge.context_from_hwnd(WINDOW_HWND)
-    cookie = leaked.value
     bridge.close()
 
-    assert backend.released == 0
-    assert backend.live_cookies == frozenset({cookie})
+    assert backend.released == 1
+    assert backend.live_cookies == frozenset()
+    assert leaked.closed
     leaked.close()
     assert leaked.closed
-    assert backend.released == 0
-    assert bridge.live_ref_count == 1
+    assert backend.released == 1
+    assert bridge.live_ref_count == 0

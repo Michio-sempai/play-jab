@@ -15,10 +15,17 @@ __all__ = ["JavaRef", "ReferenceReleaser"]
 class ReferenceReleaser(Protocol):
     """Whatever can hand an owned reference back to the JVM."""
 
-    def _release_java_object(self, vm_id: int, value: int) -> None: ...
+    def _release_java_object(
+        self, ownership_id: int, vm_id: int, value: int
+    ) -> None: ...
 
 
-def _release(releaser: ReferenceReleaser, vm_id: int, value: int) -> None:
+def _release(
+    releaser: ReferenceReleaser,
+    ownership_id: int,
+    vm_id: int,
+    value: int,
+) -> None:
     """Release a cookie, tolerating a runtime that is already gone.
 
     Must not close over the :class:`JavaRef` itself - it runs as a finalizer.
@@ -28,7 +35,7 @@ def _release(releaser: ReferenceReleaser, vm_id: int, value: int) -> None:
     # Narrow by construction: JavaReferenceClosedError is a sibling rather than a
     # subclass of BridgeClosedError, so this cannot swallow one.
     with contextlib.suppress(BridgeClosedError):
-        releaser._release_java_object(vm_id, value)
+        releaser._release_java_object(ownership_id, vm_id, value)
 
 
 class JavaRef:
@@ -46,7 +53,13 @@ class JavaRef:
 
     __slots__ = ("__weakref__", "_finalizer", "_owner", "_value", "_vm_id")
 
-    def __init__(self, releaser: ReferenceReleaser, vm_id: int, value: int) -> None:
+    def __init__(
+        self,
+        releaser: ReferenceReleaser,
+        ownership_id: int,
+        vm_id: int,
+        value: int,
+    ) -> None:
         # Runtime identity is part of the reference's safety boundary. Cookies
         # are meaningful only to the backend instance that minted them; handing
         # one to another runtime is undefined native behaviour.
@@ -55,7 +68,14 @@ class JavaRef:
         self._value = value
         # finalize() is one-shot, which is what makes close() idempotent: calling
         # it twice releases exactly once.
-        self._finalizer = weakref.finalize(self, _release, releaser, vm_id, value)
+        self._finalizer = weakref.finalize(
+            self,
+            _release,
+            releaser,
+            ownership_id,
+            vm_id,
+            value,
+        )
 
     def _belongs_to(self, owner: object) -> bool:
         """Whether ``owner`` is the runtime that minted this reference."""
@@ -88,6 +108,10 @@ class JavaRef:
     def close(self) -> None:
         """Release the reference. Safe to call any number of times."""
         self._finalizer()
+
+    def _invalidate(self) -> None:
+        """Mark closed after runtime-owned shutdown release, without releasing again."""
+        self._finalizer.detach()
 
     def __enter__(self) -> JavaRef:
         return self

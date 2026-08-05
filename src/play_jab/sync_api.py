@@ -6,23 +6,24 @@ from __future__ import annotations
 import ctypes
 import os
 import re
-import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from re import Pattern
 from types import TracebackType
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, TypeVar, cast
 
-from play_jab._native.backend import ContextInfo, dll_backend_factory
+from play_jab._native.backend import ContextInfo, TableCellInfo, dll_backend_factory
 from play_jab._native.bridge import BridgeRuntime
+from play_jab._native.manager import RuntimeManager, RuntimeSession
 from play_jab._native.refs import JavaRef
 from play_jab.exceptions import (
     BridgeClosedError,
     JavaProcessExitedError,
+    JavaVmExitedError,
     JavaWindowAmbiguousError,
     JavaWindowNotFoundError,
     JavaWindowNotAccessibleError,
@@ -30,6 +31,7 @@ from play_jab.exceptions import (
     LocatorTimeoutError,
     NativeCallError,
     StrictModeViolation,
+    TableIndexError,
     UnsupportedActionError,
 )
 from play_jab.registry import AccessibilityRegistry
@@ -44,6 +46,9 @@ __all__ = [
     "JavaWindow",
     "Locator",
     "PlayJab",
+    "TableCellLocator",
+    "TableLocator",
+    "TableSnapshot",
     "WindowExpectation",
     "contains",
 ]
@@ -76,6 +81,7 @@ def contains(text: str) -> _Contains:
 
 
 TextMatcher: TypeAlias = str | Pattern[str] | _Contains
+_Result = TypeVar("_Result")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +136,17 @@ class AccessibilityNode:
         return self.snapshot.states
 
 
+@dataclass(frozen=True, slots=True)
+class TableSnapshot:
+    """Immutable copy of the currently materialized table contents."""
+
+    row_count: int
+    column_count: int
+    cells: tuple[tuple[str, ...], ...]
+    selected_rows: tuple[int, ...]
+    selected_columns: tuple[int, ...]
+
+
 class WindowBackend(Protocol):
     def enum_windows(self) -> list[int]: ...
 
@@ -148,23 +165,57 @@ class WindowBackend(Protocol):
     def send_left_click(self) -> None: ...
 
 
-class ProcessHandle(Protocol):
-    pid: int
+class _RuntimeFacade(Protocol):
+    @property
+    def live_ref_count(self) -> int: ...
 
+    def is_java_window(self, hwnd: int) -> bool: ...
 
-Command: TypeAlias = str | os.PathLike[str] | Sequence[str | os.PathLike[str]]
+    def is_vm_exited_window(self, hwnd: int) -> bool: ...
 
+    def context_from_hwnd(self, hwnd: int) -> JavaRef: ...
 
-class ProcessBackend(Protocol):
-    def launch(
-        self,
-        command: Command,
-        *,
-        cwd: str | os.PathLike[str] | None,
-        env: Mapping[str, str] | None,
-    ) -> ProcessHandle: ...
+    def context_info(self, ref: JavaRef) -> ContextInfo: ...
 
-    def is_alive(self, pid: int) -> bool: ...
+    def child(self, ref: JavaRef, index: int) -> JavaRef | None: ...
+
+    def accessible_text(self, ref: JavaRef) -> str | None: ...
+
+    def accessible_actions(self, ref: JavaRef) -> tuple[str, ...]: ...
+
+    def do_accessible_actions(self, ref: JavaRef, actions: tuple[str, ...]) -> None: ...
+
+    def request_focus(self, ref: JavaRef) -> None: ...
+
+    def set_text_contents(self, ref: JavaRef, text: str) -> None: ...
+
+    def clear_selection(self, ref: JavaRef) -> None: ...
+
+    def set_child_selected(self, ref: JavaRef, index: int, selected: bool) -> None: ...
+
+    def is_child_selected(self, ref: JavaRef, index: int) -> bool: ...
+
+    def table_info(
+        self, ref: JavaRef
+    ) -> tuple[int, int, tuple[JavaRef | None, ...]]: ...
+
+    def table_cell(
+        self, table_ref: JavaRef, row: int, column: int
+    ) -> tuple[JavaRef, TableCellInfo]: ...
+
+    def table_header(
+        self, ref: JavaRef, *, column: bool
+    ) -> tuple[int, int, tuple[JavaRef | None, ...]] | None: ...
+
+    def table_selections(
+        self, table_ref: JavaRef, *, column: bool
+    ) -> tuple[int, ...]: ...
+
+    def set_table_row_selected(
+        self, context_ref: JavaRef, row: int, selected: bool
+    ) -> None: ...
+
+    def wait_for_event(self, timeout: float) -> None: ...
 
 
 class _Win32WindowBackend:
@@ -289,51 +340,41 @@ class _Win32WindowBackend:
             raise ctypes.WinError(ctypes.get_last_error())
 
 
-class _SubprocessBackend:
-    def launch(
-        self,
-        command: Command,
-        *,
-        cwd: str | os.PathLike[str] | None,
-        env: Mapping[str, str] | None,
-    ) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(command, cwd=cwd, env=env)
-
-    def is_alive(self, pid: int) -> bool:
-        if sys.platform == "win32":
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [
-                ctypes.c_uint32,
-                ctypes.c_int,
-                ctypes.c_uint32,
-            ]
-            kernel32.OpenProcess.restype = ctypes.c_void_p
-            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel32.CloseHandle.restype = ctypes.c_int
-            kernel32.GetExitCodeProcess.argtypes = [
-                ctypes.c_void_p,
-                ctypes.POINTER(ctypes.c_uint32),
-            ]
-            kernel32.GetExitCodeProcess.restype = ctypes.c_int
-            process = kernel32.OpenProcess(
-                _PROCESS_QUERY_LIMITED_INFORMATION,
-                False,
-                pid,
-            )
-            if not process:
-                return False
-            exit_code = ctypes.c_uint32()
-            try:
-                return bool(
-                    kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
-                ) and (exit_code.value == _STILL_ACTIVE)
-            finally:
-                kernel32.CloseHandle(process)
-        try:
-            os.kill(pid, 0)
-        except OSError:
+def _is_process_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_uint32,
+        ]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.GetExitCodeProcess.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        process = kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not process:
             return False
-        return True
+        exit_code = ctypes.c_uint32()
+        try:
+            return bool(
+                kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
+            ) and (exit_code.value == _STILL_ACTIVE)
+        finally:
+            kernel32.CloseHandle(process)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def _create_runtime(
@@ -350,10 +391,6 @@ def _create_window_backend() -> WindowBackend:
     return _Win32WindowBackend()
 
 
-def _create_process_backend() -> ProcessBackend:
-    return _SubprocessBackend()
-
-
 def _timeout(value: int, name: str = "timeout") -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer in milliseconds")
@@ -368,6 +405,9 @@ def _positive(value: int | None, name: str) -> int | None:
     return value
 
 
+_RUNTIME_MANAGER = RuntimeManager()
+
+
 class PlayJab:
     """Own one bridge runtime and create Java application handles."""
 
@@ -380,29 +420,52 @@ class PlayJab:
     ) -> None:
         self._timeout = _timeout(timeout)
         self._registry = AccessibilityRegistry(extra_roles, extra_states)
-        self._runtime = _create_runtime(dll_path, self._timeout)
+        self._dll_path = dll_path
+        self._runtime: RuntimeSession | None = None
+        self._lifecycle_lock = threading.RLock()
         self._windows = _create_window_backend()
-        self._processes = _create_process_backend()
         self._started = False
         self._closed = False
         self._context_depth = 0
 
     @property
     def live_ref_count(self) -> int:
-        return self._runtime.live_ref_count
+        runtime = self._runtime
+        return 0 if runtime is None else runtime.live_ref_count
+
+    def _ensure_open(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                raise BridgeClosedError("PlayJab is closed")
+
+    @property
+    def _bridge(self) -> _RuntimeFacade:
+        self._ensure_started()
+        runtime = self._runtime
+        if runtime is None:  # pragma: no cover - guarded by _ensure_started
+            raise BridgeClosedError("PlayJab is not started")
+        return cast("_RuntimeFacade", runtime)
 
     def _ensure_started(self) -> None:
-        if self._closed:
-            raise BridgeClosedError("PlayJab is closed")
-        if not self._started:
-            self._runtime.start()
-            self._started = True
+        with self._lifecycle_lock:
+            if self._closed:
+                raise BridgeClosedError("PlayJab is closed")
+            if not self._started:
+                self._runtime = _RUNTIME_MANAGER.acquire(
+                    self._dll_path,
+                    self._timeout,
+                    _create_runtime,
+                )
+                self._started = True
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._runtime.close()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            runtime = self._runtime
+        if runtime is not None:
+            runtime.close()
 
     def __enter__(self) -> PlayJab:
         self._ensure_started()
@@ -418,17 +481,6 @@ class PlayJab:
         self._context_depth = max(0, self._context_depth - 1)
         if self._context_depth == 0:
             self.close()
-
-    def launch(
-        self,
-        command: Command,
-        *,
-        cwd: str | os.PathLike[str] | None = None,
-        env: Mapping[str, str] | None = None,
-    ) -> JavaApplication:
-        self._ensure_started()
-        handle = self._processes.launch(command, cwd=cwd, env=env)
-        return self._application(_positive(handle.pid, "pid"))
 
     def attach(
         self,
@@ -448,7 +500,7 @@ class PlayJab:
         wait = self._timeout if timeout is None else _timeout(timeout)
         self._ensure_started()
         if pid is not None:
-            if not self._processes.is_alive(pid):
+            if not _is_process_alive(pid):
                 raise JavaProcessExitedError(f"process {pid} is not running")
             return self._application(pid)
         window = self._wait_window(hwnd=hwnd, title=title, timeout=wait)
@@ -460,10 +512,13 @@ class PlayJab:
         return JavaApplication(self, pid)
 
     def _java_windows(self) -> list[int]:
+        runtime = self._runtime
+        if runtime is None:
+            raise BridgeClosedError("PlayJab is not started")
         return [
             hwnd
             for hwnd in self._windows.enum_windows()
-            if self._runtime.is_java_window(hwnd)
+            if runtime.is_java_window(hwnd)
         ]
 
     def _wait_window(
@@ -476,8 +531,18 @@ class PlayJab:
     ) -> int:
         deadline = time.monotonic() + timeout / 1_000
         while True:
-            if pid is not None and not self._processes.is_alive(pid):
+            if pid is not None and not _is_process_alive(pid):
                 raise JavaProcessExitedError(f"process {pid} exited")
+            raw_windows = self._windows.enum_windows()
+            dead = [
+                candidate
+                for candidate in raw_windows
+                if (hwnd is None or candidate == hwnd)
+                and (pid is None or self._windows.get_window_pid(candidate) == pid)
+                and self._bridge.is_vm_exited_window(candidate)
+            ]
+            if dead:
+                raise JavaVmExitedError(f"JVM for Java window {dead[0]:#x} has exited")
             matches = self._java_windows()
             if hwnd is not None:
                 matches = [candidate for candidate in matches if candidate == hwnd]
@@ -502,7 +567,7 @@ class PlayJab:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise JavaWindowNotFoundError("Java window was not found")
-            time.sleep(min(_POLL_INTERVAL, remaining))
+            self._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
 
 class JavaApplication:
@@ -519,6 +584,7 @@ class JavaApplication:
         title: str | None = None,
         timeout: int | None = None,
     ) -> JavaWindow:
+        self._api._ensure_open()
         hwnd = _positive(hwnd, "hwnd")
         if hwnd is not None and title is not None:
             raise ValueError("window() accepts at most one of hwnd or title")
@@ -531,7 +597,7 @@ class JavaApplication:
             pid=self.pid,
             timeout=wait,
         )
-        return JavaWindow(self, resolved)
+        return JavaWindow(self, resolved, wait)
 
     def expect_window(
         self,
@@ -606,7 +672,7 @@ class WindowExpectation:
         deadline = time.monotonic() + self._timeout / 1_000
         inaccessible: int | None = None
         while True:
-            if not api._processes.is_alive(self._application.pid):
+            if not _is_process_alive(self._application.pid):
                 raise JavaProcessExitedError(
                     f"process {self._application.pid} exited while waiting for window"
                 )
@@ -618,14 +684,14 @@ class WindowExpectation:
                 )
             if matches:
                 hwnd = matches[0]
-                if api._runtime.is_java_window(hwnd):
+                if api._bridge.is_java_window(hwnd):
                     try:
-                        with api._runtime.context_from_hwnd(hwnd):
+                        with api._bridge.context_from_hwnd(hwnd):
                             pass
                     except (JavaWindowNotFoundError, JavaWindowNotAccessibleError):
                         pass
                     else:
-                        return JavaWindow(self._application, hwnd)
+                        return JavaWindow(self._application, hwnd, self._timeout)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if inaccessible is not None:
@@ -638,7 +704,7 @@ class WindowExpectation:
                     f"new window{title} was not found for process "
                     f"{self._application.pid}"
                 )
-            time.sleep(min(_POLL_INTERVAL, remaining))
+            api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,9 +749,10 @@ def _matcher(value: object, name: str) -> TextMatcher | None:
 class JavaWindow:
     """A top-level Java window identified only by HWND, never by a JAB cookie."""
 
-    def __init__(self, application: JavaApplication, hwnd: int) -> None:
+    def __init__(self, application: JavaApplication, hwnd: int, timeout: int) -> None:
         self.application = application
         self.hwnd = hwnd
+        self._timeout = timeout
 
     @property
     def _api(self) -> PlayJab:
@@ -733,7 +800,7 @@ class JavaWindow:
 
     def _read_tree(self, max_depth: int, max_nodes: int) -> AccessibilityNode:
         remaining = [max_nodes]
-        with self._api._runtime.context_from_hwnd(self.hwnd) as root:
+        with self._api._bridge.context_from_hwnd(self.hwnd) as root:
             return self._read_node(root, 0, max_depth, remaining)
 
     def _read_node(
@@ -743,7 +810,7 @@ class JavaWindow:
         max_depth: int,
         remaining: list[int],
     ) -> AccessibilityNode:
-        info = _context_info(self._api._runtime, ref)
+        info = _context_info(self._api._bridge, ref)
         snapshot = _snapshot(info, self._api._registry)
         remaining[0] -= 1
         children: list[AccessibilityNode] = []
@@ -751,7 +818,7 @@ class JavaWindow:
             for index in range(info.children_count):
                 if remaining[0] <= 0:
                     break
-                child = self._api._runtime.child(ref, index)
+                child = self._api._bridge.child(ref, index)
                 if child is None:
                     raise _StaleContext
                 with child:
@@ -893,7 +960,163 @@ class Locator:
         return [self.nth(index) for index in range(self.count())]
 
     def snapshot(self) -> ElementSnapshot:
-        return self._wait_strict(self._window._api._timeout).snapshot
+        return self._wait_strict(self._window._timeout).snapshot
+
+    def _operate(
+        self,
+        operation: Callable[[_RuntimeFacade, JavaRef, ElementSnapshot], _Result],
+    ) -> _Result:
+        match = self._wait_strict(self._window._timeout)
+        runtime = self._window._api._bridge
+        with runtime.context_from_hwnd(self._window.hwnd) as root:
+            current = root
+            owned: JavaRef | None = None
+            try:
+                for index in match.path:
+                    info = runtime.context_info(current)
+                    self._check_actionable(
+                        _snapshot(info, self._window._api._registry),
+                        require_action=False,
+                    )
+                    child = runtime.child(current, index)
+                    if child is None:
+                        raise _StaleLocatorError("locator path became stale")
+                    if owned is not None:
+                        owned.close()
+                    owned = child
+                    current = child
+                info = runtime.context_info(current)
+                snapshot = _snapshot(info, self._window._api._registry)
+                self._check_actionable(snapshot, require_action=False)
+                return operation(runtime, current, snapshot)
+            finally:
+                if owned is not None:
+                    owned.close()
+
+    def focus(self) -> None:
+        """Request focus and verify the observable focused state."""
+        self._operate(lambda runtime, ref, _snapshot: runtime.request_focus(ref))
+        if "focused" not in self.snapshot().states:
+            raise LocatorError("focus postcondition was not observed")
+
+    def fill(self, value: str) -> None:
+        """Replace the contents of an editable text component."""
+        if not isinstance(value, str):
+            raise TypeError("fill() value must be a string")
+
+        def write(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            snapshot: ElementSnapshot,
+        ) -> str:
+            runtime.set_text_contents(ref, value)
+            return snapshot.role
+
+        role = self._operate(write)
+        # Do not include either value in diagnostics: this may be a password.
+        observed = self.text_content()
+        postcondition = (
+            len(observed) == len(value) if role == _PASSWORD_ROLE else observed == value
+        )
+        if not postcondition:
+            raise LocatorError("fill postcondition was not observed")
+
+    def clear(self) -> None:
+        self.fill("")
+
+    def text_content(self) -> str:
+        """Read AccessibleText, falling back to description and then name."""
+
+        def read(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            snapshot: ElementSnapshot,
+        ) -> str:
+            if snapshot.accessible_text:
+                text = runtime.accessible_text(ref)
+                if text is not None:
+                    return text
+            return snapshot.description or snapshot.name
+
+        return self._operate(read)
+
+    def is_checked(self) -> bool:
+        return "checked" in self.snapshot().states
+
+    def is_selected(self) -> bool:
+        return "selected" in self.snapshot().states
+
+    def check(self) -> None:
+        if not self.is_checked():
+            self.click()
+        if not self.is_checked():
+            raise LocatorError("check postcondition was not observed")
+
+    def uncheck(self) -> None:
+        if self.is_checked():
+            self.click()
+        if self.is_checked():
+            raise LocatorError("uncheck postcondition was not observed")
+
+    def select_option(self, option: str | int) -> None:
+        """Select one direct child by exact accessible name or zero-based index."""
+        if isinstance(option, bool) or not isinstance(option, (str, int)):
+            raise TypeError("option must be an exact name or zero-based index")
+
+        def select(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            snapshot: ElementSnapshot,
+        ) -> None:
+            del snapshot
+            info = runtime.context_info(ref)
+            candidates: list[tuple[int, str]] = []
+            for index in range(info.children_count):
+                child = runtime.child(ref, index)
+                if child is None:
+                    continue
+                try:
+                    candidates.append((index, runtime.context_info(child).name))
+                finally:
+                    child.close()
+            if isinstance(option, int):
+                if option < 0 or option >= info.children_count:
+                    raise LocatorError("option index is outside the available children")
+                index = option
+            else:
+                matches = [index for index, name in candidates if name == option]
+                if len(matches) != 1:
+                    raise StrictModeViolation(
+                        f"option name resolved to {len(matches)} direct children"
+                    )
+                index = matches[0]
+            runtime.clear_selection(ref)
+            runtime.set_child_selected(ref, index, True)
+            if not runtime.is_child_selected(ref, index):
+                raise LocatorError("selection postcondition was not observed")
+
+        self._operate(select)
+
+    def get_attribute(self, name: str) -> object:
+        snapshot = self.snapshot()
+        attributes: dict[str, object] = {
+            "name": snapshot.name,
+            "description": snapshot.description,
+            "role": snapshot.role,
+            "states": snapshot.states,
+            "bounds": (snapshot.x, snapshot.y, snapshot.width, snapshot.height),
+            "visible": snapshot.visible,
+            "enabled": snapshot.enabled,
+            "checked": "checked" in snapshot.states,
+            "selected": "selected" in snapshot.states,
+        }
+        if name not in attributes:
+            raise ValueError(f"unsupported attribute: {name}")
+        return attributes[name]
+
+    def as_table(self) -> TableLocator:
+        """Interpret the strict locator target through AccessibleTable."""
+        return TableLocator(self)
 
     def click(self, *, opens_window: bool = False) -> None:
         """Click the strict target semantically or with opt-in Win32 input."""
@@ -903,7 +1126,7 @@ class Locator:
             self._click_with_mouse()
             return
         for attempt in range(2):
-            match = self._wait_strict(self._window._api._timeout)
+            match = self._wait_strict(self._window._timeout)
             self._check_actionable(match.snapshot, require_action=True)
             try:
                 self._perform_semantic_click(match)
@@ -938,7 +1161,7 @@ class Locator:
             )
 
     def _perform_semantic_click(self, match: _Match) -> None:
-        runtime = self._window._api._runtime
+        runtime = self._window._api._bridge
         with runtime.context_from_hwnd(self._window.hwnd) as root:
             current = root
             owned: JavaRef | None = None
@@ -980,7 +1203,7 @@ class Locator:
                     owned.close()
 
     def _click_with_mouse(self) -> None:
-        match = self._wait_strict(self._window._api._timeout)
+        match = self._wait_strict(self._window._timeout)
         snapshot = match.snapshot
         self._check_actionable(snapshot, require_action=False)
         if snapshot.width <= 0 or snapshot.height <= 0:
@@ -1022,7 +1245,7 @@ class Locator:
     def wait_for(self, state: str = "visible", timeout: int | None = None) -> None:
         if state not in {"attached", "detached", "visible", "hidden"}:
             raise ValueError("state must be attached, detached, visible, or hidden")
-        wait = self._window._api._timeout if timeout is None else _timeout(timeout)
+        wait = self._window._timeout if timeout is None else _timeout(timeout)
         deadline = time.monotonic() + wait / 1_000
         while True:
             try:
@@ -1034,7 +1257,7 @@ class Locator:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._raise_timeout(state, wait)
-            time.sleep(min(_POLL_INTERVAL, remaining))
+            self._window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
     def _condition(self, state: str, matches: list[_Match]) -> bool:
         if state == "detached":
@@ -1060,7 +1283,7 @@ class Locator:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._raise_timeout("attached", timeout)
-            time.sleep(min(_POLL_INTERVAL, remaining))
+            self._window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
     def _strict(self, matches: list[_Match]) -> _Match:
         if len(matches) != 1:
@@ -1129,7 +1352,7 @@ class Locator:
         *,
         include_start: bool,
     ) -> list[_Match]:
-        runtime = self._window._api._runtime
+        runtime = self._window._api._bridge
         with runtime.context_from_hwnd(self._window.hwnd) as root:
             start = root
             owned: JavaRef | None = None
@@ -1170,13 +1393,17 @@ class Locator:
     ) -> None:
         if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
             raise LocatorError("accessibility traversal limit exceeded")
-        info = _context_info(self._window._api._runtime, ref)
+        info = _context_info(self._window._api._bridge, ref)
         seen[0] += 1
-        snapshot = _snapshot(info, self._window._api._registry)
-        if consider and query.matches(snapshot):
-            matches.append(_Match(path, snapshot))
+        raw_snapshot = _snapshot(
+            info,
+            self._window._api._registry,
+            redact_password=False,
+        )
+        if consider and query.matches(raw_snapshot):
+            matches.append(_Match(path, _snapshot(info, self._window._api._registry)))
         for index in range(info.children_count):
-            child = self._window._api._runtime.child(ref, index)
+            child = self._window._api._bridge.child(ref, index)
             if child is None:
                 raise _StaleContext
             with child:
@@ -1214,7 +1441,7 @@ class Locator:
         max_nodes: int,
     ) -> AccessibilityNode:
         # The path is resolved afresh; no cookie from the locator pass survives.
-        runtime = self._window._api._runtime
+        runtime = self._window._api._bridge
         with runtime.context_from_hwnd(self._window.hwnd) as root:
             current = root
             owned: JavaRef | None = None
@@ -1241,7 +1468,246 @@ class Locator:
         return _format_tree(self.accessibility_tree(max_depth, max_nodes))
 
 
-def _context_info(runtime: BridgeRuntime, ref: JavaRef) -> ContextInfo:
+class TableLocator:
+    """Lazy AccessibleTable view over a strict locator."""
+
+    def __init__(self, locator: Locator) -> None:
+        self._locator = locator
+
+    @staticmethod
+    def _close_refs(refs: tuple[JavaRef | None, ...]) -> None:
+        for ref in reversed(refs):
+            if ref is not None:
+                ref.close()
+
+    def _with_table(
+        self,
+        operation: Callable[[_RuntimeFacade, JavaRef, JavaRef, int, int], _Result],
+    ) -> _Result:
+        def invoke(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            _snapshot: ElementSnapshot,
+        ) -> _Result:
+            rows, columns, refs = runtime.table_info(ref)
+            context_ref, table_ref = refs[2:]
+            if context_ref is None or table_ref is None:
+                self._close_refs(refs)
+                raise NativeCallError(
+                    "getAccessibleTableInfo", reason="missing handles"
+                )
+            try:
+                return operation(runtime, context_ref, table_ref, rows, columns)
+            finally:
+                self._close_refs(refs)
+
+        return self._locator._operate(invoke)
+
+    def row_count(self) -> int:
+        return self._with_table(lambda _runtime, _context, _table, rows, _cols: rows)
+
+    def column_count(self) -> int:
+        return self._with_table(lambda _runtime, _context, _table, _rows, cols: cols)
+
+    def cell(self, row: int, column: int) -> TableCellLocator:
+        self._validate_index(row, column)
+        return TableCellLocator(self, row, column)
+
+    def row_header(self, row: int) -> TableCellLocator:
+        if isinstance(row, bool) or not isinstance(row, int) or row < 0:
+            raise TableIndexError("row index must be a non-negative integer")
+        if row >= self.row_count():
+            raise TableIndexError(f"row {row} is outside the table")
+        return TableCellLocator(self, row, 0, header="row")
+
+    def column_header(self, column: int) -> TableCellLocator:
+        if isinstance(column, bool) or not isinstance(column, int) or column < 0:
+            raise TableIndexError("column index must be a non-negative integer")
+        if column >= self.column_count():
+            raise TableIndexError(f"column {column} is outside the table")
+        return TableCellLocator(self, 0, column, header="column")
+
+    def _validate_index(self, row: int, column: int) -> None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (row, column)
+        ):
+            raise TableIndexError("table indices must be non-negative integers")
+        rows = self.row_count()
+        columns = self.column_count()
+        if row >= rows or column >= columns:
+            raise TableIndexError(
+                f"cell ({row}, {column}) is outside table {rows}x{columns}"
+            )
+
+    def selected_rows(self) -> tuple[int, ...]:
+        return self._with_table(
+            lambda runtime, _context, table, _rows, _columns: runtime.table_selections(
+                table, column=False
+            )
+        )
+
+    def selected_columns(self) -> tuple[int, ...]:
+        return self._with_table(
+            lambda runtime, _context, table, _rows, _columns: runtime.table_selections(
+                table, column=True
+            )
+        )
+
+    def _select_row(self, row: int, selected: bool) -> None:
+        if isinstance(row, bool) or not isinstance(row, int) or row < 0:
+            raise TableIndexError("row index must be a non-negative integer")
+
+        def select(
+            runtime: _RuntimeFacade,
+            context: JavaRef,
+            _table: JavaRef,
+            rows: int,
+            _columns: int,
+        ) -> None:
+            if row >= rows:
+                raise TableIndexError(f"row {row} is outside the table")
+            runtime.set_table_row_selected(context, row, selected)
+
+        self._with_table(select)
+        observed = row in self.selected_rows()
+        if observed != selected:
+            raise LocatorError("row selection postcondition was not observed")
+
+    def select_row(self, row: int) -> None:
+        self._select_row(row, True)
+
+    def unselect_row(self, row: int) -> None:
+        self._select_row(row, False)
+
+    def snapshot(self) -> TableSnapshot:
+        rows = self.row_count()
+        columns = self.column_count()
+        cells = tuple(
+            tuple(self.cell(row, column).text_content() for column in range(columns))
+            for row in range(rows)
+        )
+        return TableSnapshot(
+            row_count=rows,
+            column_count=columns,
+            cells=cells,
+            selected_rows=self.selected_rows(),
+            selected_columns=self.selected_columns(),
+        )
+
+
+class TableCellLocator:
+    """Lazy cell addressed through AccessibleTable rather than child traversal."""
+
+    def __init__(
+        self,
+        table: TableLocator,
+        row: int,
+        column: int,
+        *,
+        header: Literal["row", "column"] | None = None,
+    ) -> None:
+        self._table = table
+        self.row = row
+        self.column = column
+        self._header = header
+
+    def _operate(
+        self,
+        operation: Callable[[_RuntimeFacade, JavaRef, JavaRef, TableCellInfo], _Result],
+    ) -> _Result:
+        def with_table(
+            runtime: _RuntimeFacade,
+            context: JavaRef,
+            table: JavaRef,
+            _rows: int,
+            _columns: int,
+        ) -> _Result:
+            extra_refs: tuple[JavaRef | None, ...] = ()
+            if self._header is not None:
+                header = runtime.table_header(context, column=self._header == "column")
+                if header is None or header[2][2] is None or header[2][3] is None:
+                    raise UnsupportedActionError("table header is not available")
+                extra_refs = header[2]
+                context = cast("JavaRef", extra_refs[2])
+                table = cast("JavaRef", extra_refs[3])
+            try:
+                cell_ref, info = runtime.table_cell(table, self.row, self.column)
+                try:
+                    return operation(runtime, context, cell_ref, info)
+                finally:
+                    cell_ref.close()
+            finally:
+                TableLocator._close_refs(extra_refs)
+
+        return self._table._with_table(with_table)
+
+    def text_content(self) -> str:
+        def read(
+            runtime: _RuntimeFacade,
+            _context: JavaRef,
+            cell: JavaRef,
+            _info: TableCellInfo,
+        ) -> str:
+            info = runtime.context_info(cell)
+            if info.accessible_text:
+                text = runtime.accessible_text(cell)
+                if text is not None:
+                    return text
+            return info.description or info.name
+
+        return self._operate(read)
+
+    def is_selected(self) -> bool:
+        return self._operate(lambda _runtime, _context, _cell, info: info.selected)
+
+    def _set_selected(self, selected: bool) -> None:
+        def select(
+            runtime: _RuntimeFacade,
+            context: JavaRef,
+            _cell: JavaRef,
+            info: TableCellInfo,
+        ) -> None:
+            runtime.set_child_selected(context, info.index, selected)
+
+        try:
+            self._operate(select)
+        except NativeCallError as error:
+            if error.function == "getAccessibleTableCellInfo":
+                raise UnsupportedActionError(
+                    "table cell is not materialized for selection"
+                ) from None
+            raise
+        if self.is_selected() != selected:
+            raise LocatorError("cell selection postcondition was not observed")
+
+    def select(self) -> None:
+        self._set_selected(True)
+
+    def unselect(self) -> None:
+        self._set_selected(False)
+
+    def wait_for_text(self, text: str, timeout: int | None = None) -> None:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        window = self._table._locator._window
+        wait = window._timeout if timeout is None else _timeout(timeout)
+        deadline = time.monotonic() + wait / 1_000
+        last = ""
+        while True:
+            last = self.text_content()
+            if last == text:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LocatorTimeoutError(
+                    f"cell ({self.row}, {self.column}) did not reach expected "
+                    f"text within {wait} ms; last={last!r}"
+                )
+            window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
+
+
+def _context_info(runtime: BridgeRuntime | _RuntimeFacade, ref: JavaRef) -> ContextInfo:
     try:
         return runtime.context_info(ref)
     except NativeCallError as error:
@@ -1257,12 +1723,14 @@ def _states(value: str) -> frozenset[str]:
 def _snapshot(
     info: ContextInfo,
     registry: AccessibilityRegistry,
+    *,
+    redact_password: bool = True,
 ) -> ElementSnapshot:
     role = registry.role(info.role_en_us)
     states = _states(info.states_en_us)
     for state in states:
         registry.state(state)
-    password = info.role_en_us == _PASSWORD_ROLE
+    password = redact_password and info.role_en_us == _PASSWORD_ROLE
     return ElementSnapshot(
         name="<redacted>" if password and info.name else info.name,
         description="<redacted>" if password and info.description else info.description,

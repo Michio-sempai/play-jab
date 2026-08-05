@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
 import play_jab
@@ -24,17 +22,9 @@ DIALOG = 0x200
 OTHER_DIALOG = 0x300
 
 
-@dataclass(frozen=True)
-class _Handle:
-    pid: int
-
-
 class _Processes:
     def __init__(self) -> None:
         self.alive = True
-
-    def launch(self, command: object, *, cwd: object, env: object) -> _Handle:
-        return _Handle(PID)
 
     def is_alive(self, pid: int) -> bool:
         return pid == PID and self.alive
@@ -92,7 +82,7 @@ def _application(
     processes = _Processes()
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
-    monkeypatch.setattr(sync_api, "_create_process_backend", lambda: processes)
+    monkeypatch.setattr(sync_api, "_is_process_alive", processes.is_alive)
     api = PlayJab(timeout=0)
     api.__enter__()
     return api, api.attach(pid=PID), windows, processes

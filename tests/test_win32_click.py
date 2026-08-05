@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
-from dataclasses import dataclass
 
 import pytest
 
@@ -17,19 +16,6 @@ from play_jab.sync_api import JavaWindow, PlayJab
 PID = 4242
 HWND = 0xCAFE
 CLICK_COUNT = 2
-
-
-@dataclass(frozen=True)
-class _Handle:
-    pid: int
-
-
-class _Processes:
-    def launch(self, command: object, *, cwd: object, env: object) -> _Handle:
-        return _Handle(PID)
-
-    def is_alive(self, pid: int) -> bool:
-        return pid == PID
 
 
 class _InputWindows:
@@ -97,7 +83,7 @@ def mouse_api(
     windows = _InputWindows()
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
-    monkeypatch.setattr(sync_api, "_create_process_backend", _Processes)
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
     api = PlayJab(timeout=0)
     api.__enter__()
     try:

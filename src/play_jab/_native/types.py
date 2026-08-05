@@ -21,13 +21,19 @@ __all__ = [
     "MAX_ACTIONS_TO_DO",
     "MAX_ACTION_INFO",
     "MAX_STRING_SIZE",
+    "MAX_TABLE_SELECTIONS",
+    "MAX_VISIBLE_CHILDREN",
     "SHORT_STRING_SIZE",
     "AccessibleActionInfo",
     "AccessibleActions",
     "AccessibleActionsToDo",
     "AccessibleContext",
     "AccessibleContextInfo",
+    "AccessibleTableCellInfo",
+    "AccessibleTableInfo",
+    "AccessibleTextInfo",
     "JavaObject",
+    "VisibleChildrenInfo",
     "jint",
     "jlong",
 ]
@@ -37,6 +43,8 @@ MAX_STRING_SIZE = 1024
 SHORT_STRING_SIZE = 256
 MAX_ACTION_INFO = 256
 MAX_ACTIONS_TO_DO = 32
+MAX_TABLE_SELECTIONS = 64
+MAX_VISIBLE_CHILDREN = 256
 
 # jni_md.h (Windows): `typedef long jint` and `typedef __int64 jlong`. Windows is
 # LLP64, so C `long` is 32-bit even in a 64-bit process; jint is therefore 32-bit
@@ -132,4 +140,50 @@ class AccessibleActionsToDo(ctypes.Structure):
     _fields_ = (
         ("actionsCount", jint),
         ("actions", AccessibleActionInfo * MAX_ACTIONS_TO_DO),
+    )
+
+
+class AccessibleTextInfo(ctypes.Structure):
+    """Character count and caret metadata from ``AccessibleTextInfo``."""
+
+    _fields_ = (
+        ("charCount", jint),
+        ("caretIndex", jint),
+        ("indexAtPoint", jint),
+    )
+
+
+class AccessibleTableInfo(ctypes.Structure):
+    """Table-level contexts and dimensions from JDK 17 JAB."""
+
+    _fields_ = (
+        ("caption", JOBJECT64),
+        ("summary", JOBJECT64),
+        ("rowCount", jint),
+        ("columnCount", jint),
+        ("accessibleContext", JOBJECT64),
+        ("accessibleTable", JOBJECT64),
+    )
+
+
+class AccessibleTableCellInfo(ctypes.Structure):
+    """One cell returned by ``getAccessibleTableCellInfo``."""
+
+    _fields_ = (
+        ("accessibleContext", JOBJECT64),
+        ("index", jint),
+        ("row", jint),
+        ("column", jint),
+        ("rowExtent", jint),
+        ("columnExtent", jint),
+        ("isSelected", ctypes.c_ubyte),
+    )
+
+
+class VisibleChildrenInfo(ctypes.Structure):
+    """One bounded page returned by ``getVisibleChildren``."""
+
+    _fields_ = (
+        ("returnedChildrenCount", ctypes.c_int),
+        ("children", AccessibleContext * MAX_VISIBLE_CHILDREN),
     )
