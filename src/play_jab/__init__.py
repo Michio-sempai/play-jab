@@ -1,6 +1,8 @@
 # flake8: noqa
 from play_jab import exceptions as _exceptions
 from play_jab.sync_api import (
+    AccessibleInterface,
+    AccessibleValueSnapshot,
     AccessibilityNode,
     ElementSnapshot,
     JavaApplication,
@@ -34,6 +36,8 @@ UnsupportedAccessibleStateError = _exceptions.UnsupportedAccessibleStateError
 UnsupportedActionError = _exceptions.UnsupportedActionError
 
 __all__ = [
+    "AccessibleInterface",
+    "AccessibleValueSnapshot",
     "AccessibilityNode",
     "BridgeClosedError",
     "BridgeInitializationError",

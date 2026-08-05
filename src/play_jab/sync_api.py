@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from enum import IntFlag
 from pathlib import Path
 from re import Pattern
 from types import TracebackType
@@ -41,6 +42,8 @@ if sys.platform == "win32":
 
 __all__ = [
     "AccessibilityNode",
+    "AccessibleInterface",
+    "AccessibleValueSnapshot",
     "ElementSnapshot",
     "JavaApplication",
     "JavaWindow",
@@ -65,6 +68,8 @@ _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 _INPUT_MOUSE = 0
 _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
+_MOUSEEVENTF_WHEEL = 0x0800
+_WHEEL_DELTA = 120
 _SYNTHETIC_INPUT_LOCK = threading.RLock()
 
 
@@ -85,6 +90,27 @@ _Result = TypeVar("_Result")
 
 
 @dataclass(frozen=True, slots=True)
+class AccessibleValueSnapshot:
+    """Immutable string values returned by the JAB AccessibleValue API."""
+
+    current: str
+    minimum: str
+    maximum: str
+
+
+class AccessibleInterface(IntFlag):
+    """Bits from ``AccessibleContextInfo.accessibleInterfaces``."""
+
+    VALUE = 1
+    ACTION = 2
+    COMPONENT = 4
+    SELECTION = 8
+    TABLE = 16
+    TEXT = 32
+    HYPERTEXT = 64
+
+
+@dataclass(frozen=True, slots=True)
 class ElementSnapshot:
     """Immutable accessibility metadata carrying no native reference."""
 
@@ -102,6 +128,16 @@ class ElementSnapshot:
     accessible_selection: bool
     accessible_text: bool
     accessible_interfaces: int
+    children_count: int
+
+    @property
+    def interfaces(self) -> frozenset[str]:
+        flags = AccessibleInterface(self.accessible_interfaces)
+        return frozenset(
+            str(interface.name).title()
+            for interface in AccessibleInterface
+            if flags & interface
+        )
 
     @property
     def visible(self) -> bool:
@@ -164,6 +200,8 @@ class WindowBackend(Protocol):
 
     def send_left_click(self) -> None: ...
 
+    def send_mouse_wheel(self, delta: int) -> None: ...
+
 
 class _RuntimeFacade(Protocol):
     @property
@@ -180,6 +218,10 @@ class _RuntimeFacade(Protocol):
     def child(self, ref: JavaRef, index: int) -> JavaRef | None: ...
 
     def accessible_text(self, ref: JavaRef) -> str | None: ...
+
+    def accessible_value_range(
+        self, ref: JavaRef
+    ) -> tuple[str | None, str | None, str | None]: ...
 
     def accessible_actions(self, ref: JavaRef) -> tuple[str, ...]: ...
 
@@ -217,6 +259,8 @@ class _RuntimeFacade(Protocol):
 
     def wait_for_event(self, timeout: float) -> None: ...
 
+    def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...] | None: ...
+
 
 class _Win32WindowBackend:
     """Small Win32 seam kept separate from portable locator logic."""
@@ -242,6 +286,10 @@ class _Win32WindowBackend:
         self._user32.GetWindowThreadProcessId.restype = wintypes.DWORD
         self._user32.SetForegroundWindow.argtypes = [wintypes.HWND]
         self._user32.SetForegroundWindow.restype = wintypes.BOOL
+        self._user32.GetForegroundWindow.argtypes = []
+        self._user32.GetForegroundWindow.restype = wintypes.HWND
+        self._user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        self._user32.BringWindowToTop.restype = wintypes.BOOL
         self._user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
         self._user32.GetCursorPos.restype = wintypes.BOOL
         self._user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -310,8 +358,20 @@ class _Win32WindowBackend:
         return int(pid.value)
 
     def set_foreground_window(self, hwnd: int) -> None:
-        if not self._user32.SetForegroundWindow(hwnd):
-            raise ctypes.WinError(ctypes.get_last_error())
+        # SetForegroundWindow may report FALSE with last-error 0 while Windows
+        # is still completing a permitted foreground transition. Verify the
+        # observable state and retry briefly instead of turning that ambiguous
+        # return into the misleading "operation completed successfully" error.
+        for _ in range(3):
+            self._user32.BringWindowToTop(hwnd)
+            self._user32.SetForegroundWindow(hwnd)
+            if int(self._user32.GetForegroundWindow() or 0) == hwnd:
+                return
+            time.sleep(0.01)
+        error = ctypes.get_last_error()
+        if error:
+            raise ctypes.WinError(error)
+        raise OSError(f"could not make window {hwnd:#x} foreground")
 
     def get_cursor_position(self) -> tuple[int, int]:
         point = self._wintypes.POINT()
@@ -337,6 +397,19 @@ class _Win32WindowBackend:
         inputs[1].mi = self._mouse_input(dwFlags=_MOUSEEVENTF_LEFTUP)
         sent = self._user32.SendInput(2, inputs, ctypes.sizeof(self._input))
         if sent != 2:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def send_mouse_wheel(self, delta: int) -> None:
+        event = self._input()
+        event.type = _INPUT_MOUSE
+        event.mi = self._mouse_input(
+            mouseData=ctypes.c_uint32(delta).value,
+            dwFlags=_MOUSEEVENTF_WHEEL,
+        )
+        sent = self._user32.SendInput(
+            1, ctypes.byref(event), ctypes.sizeof(self._input)
+        )
+        if sent != 1:
             raise ctypes.WinError(ctypes.get_last_error())
 
 
@@ -815,21 +888,35 @@ class JavaWindow:
         remaining[0] -= 1
         children: list[AccessibilityNode] = []
         if depth < max_depth and remaining[0] > 0:
-            for index in range(info.children_count):
-                if remaining[0] <= 0:
-                    break
-                child = self._api._bridge.child(ref, index)
-                if child is None:
-                    raise _StaleContext
-                with child:
-                    children.append(
-                        self._read_node(
-                            child,
-                            depth + 1,
-                            max_depth,
-                            remaining,
+            visible = (
+                self._api._bridge.visible_children(ref)
+                if "manages descendants" in snapshot.states
+                else None
+            )
+            if visible is not None:
+                try:
+                    for child in visible:
+                        if remaining[0] <= 0:
+                            break
+                        children.append(
+                            self._read_node(child, depth + 1, max_depth, remaining)
                         )
-                    )
+                finally:
+                    for child in reversed(visible):
+                        child.close()
+            else:
+                for index in range(info.children_count):
+                    if remaining[0] <= 0:
+                        break
+                    ordinary_child = self._api._bridge.child(ref, index)
+                    if ordinary_child is None:
+                        raise _StaleContext
+                    with ordinary_child:
+                        children.append(
+                            self._read_node(
+                                ordinary_child, depth + 1, max_depth, remaining
+                            )
+                        )
         return AccessibilityNode(snapshot, tuple(children))
 
     def dump(self, max_depth: int = 10, max_nodes: int = 1_000) -> str:
@@ -959,47 +1046,133 @@ class Locator:
     def all(self) -> list[Locator]:
         return [self.nth(index) for index in range(self.count())]
 
-    def snapshot(self) -> ElementSnapshot:
-        return self._wait_strict(self._window._timeout).snapshot
+    def snapshot(self, timeout: int | None = None) -> ElementSnapshot:
+        return self._wait_strict(self._timeout_ms(timeout)).snapshot
+
+    def _timeout_ms(self, timeout: int | None) -> int:
+        return self._window._timeout if timeout is None else _timeout(timeout)
+
+    def _deadline(self, timeout: int | None) -> tuple[int, float, float]:
+        wait = self._timeout_ms(timeout)
+        started = time.monotonic()
+        return wait, started, started + wait / 1_000
+
+    @staticmethod
+    def _remaining_ms(deadline: float) -> int:
+        return max(0, int((deadline - time.monotonic()) * 1_000))
+
+    def _wait_postcondition(
+        self,
+        condition: Callable[[], bool],
+        expected: str,
+        wait: int,
+        started: float,
+        deadline: float,
+    ) -> None:
+        while True:
+            try:
+                observed = condition()
+            except (_StaleLocatorError, LocatorTimeoutError):
+                observed = False
+            if observed:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._raise_timeout(
+                    expected,
+                    wait,
+                    started=started,
+                    last_state=observed,
+                )
+            self._window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
     def _operate(
         self,
         operation: Callable[[_RuntimeFacade, JavaRef, ElementSnapshot], _Result],
+        *,
+        timeout: int | None = None,
+        actionable: bool = False,
+        interface: AccessibleInterface | None = None,
     ) -> _Result:
-        match = self._wait_strict(self._window._timeout)
-        runtime = self._window._api._bridge
-        with runtime.context_from_hwnd(self._window.hwnd) as root:
-            current = root
-            owned: JavaRef | None = None
+        wait = self._timeout_ms(timeout)
+        started = time.monotonic()
+        deadline = started + wait / 1_000
+        attempted = False
+        while True:
+            match = self._wait_strict_until(deadline, wait)
+            runtime = self._window._api._bridge
             try:
-                for index in match.path:
-                    info = runtime.context_info(current)
-                    self._check_actionable(
-                        _snapshot(info, self._window._api._registry),
-                        require_action=False,
-                    )
-                    child = runtime.child(current, index)
-                    if child is None:
-                        raise _StaleLocatorError("locator path became stale")
-                    if owned is not None:
-                        owned.close()
-                    owned = child
-                    current = child
-                info = runtime.context_info(current)
-                snapshot = _snapshot(info, self._window._api._registry)
-                self._check_actionable(snapshot, require_action=False)
-                return operation(runtime, current, snapshot)
-            finally:
-                if owned is not None:
-                    owned.close()
+                with runtime.context_from_hwnd(self._window.hwnd) as root:
+                    current = root
+                    owned: JavaRef | None = None
+                    try:
+                        for index in match.path:
+                            info = runtime.context_info(current)
+                            if actionable:
+                                self._check_actionable(
+                                    _snapshot(info, self._window._api._registry),
+                                    require_action=False,
+                                )
+                            child = runtime.child(current, index)
+                            if child is None:
+                                raise _StaleLocatorError("locator path became stale")
+                            if owned is not None:
+                                owned.close()
+                            owned = child
+                            current = child
+                        info = runtime.context_info(current)
+                        snapshot = _snapshot(info, self._window._api._registry)
+                        if actionable:
+                            self._check_actionable(snapshot, require_action=False)
+                        if interface is not None and not self._supports(
+                            snapshot, interface
+                        ):
+                            raise UnsupportedActionError(
+                                "locator does not expose the "
+                                f"Accessible{str(interface.name).title()} interface"
+                            )
+                        return operation(runtime, current, snapshot)
+                    finally:
+                        if owned is not None:
+                            owned.close()
+            except (_StaleContext, _StaleLocatorError):
+                if attempted and time.monotonic() >= deadline:
+                    self._raise_timeout("attached", wait, started=started)
+                attempted = True
+                if time.monotonic() >= deadline:
+                    self._raise_timeout("attached", wait, started=started)
+                runtime.wait_for_event(min(_POLL_INTERVAL, deadline - time.monotonic()))
 
-    def focus(self) -> None:
+    @staticmethod
+    def _supports(snapshot: ElementSnapshot, interface: AccessibleInterface) -> bool:
+        if snapshot.accessible_interfaces & int(interface):
+            return True
+        return {
+            AccessibleInterface.ACTION: snapshot.accessible_action,
+            AccessibleInterface.COMPONENT: snapshot.accessible_component,
+            AccessibleInterface.SELECTION: snapshot.accessible_selection,
+            AccessibleInterface.TEXT: snapshot.accessible_text,
+            AccessibleInterface.TABLE: snapshot.role == "table",
+        }.get(interface, False)
+
+    def focus(self, timeout: int | None = None) -> None:
         """Request focus and verify the observable focused state."""
-        self._operate(lambda runtime, ref, _snapshot: runtime.request_focus(ref))
-        if "focused" not in self.snapshot().states:
-            raise LocatorError("focus postcondition was not observed")
+        wait, started, deadline = self._deadline(timeout)
+        self._operate(
+            lambda runtime, ref, _snapshot: runtime.request_focus(ref),
+            timeout=self._remaining_ms(deadline),
+            actionable=True,
+            interface=AccessibleInterface.COMPONENT,
+        )
+        self._wait_postcondition(
+            lambda: "focused" in self.snapshot(timeout=0).states,
+            "focused",
+            wait,
+            started,
+            deadline,
+        )
 
-    def fill(self, value: str) -> None:
+    def fill(self, value: str, timeout: int | None = None) -> None:
         """Replace the contents of an editable text component."""
         if not isinstance(value, str):
             raise TypeError("fill() value must be a string")
@@ -1012,19 +1185,30 @@ class Locator:
             runtime.set_text_contents(ref, value)
             return snapshot.role
 
-        role = self._operate(write)
-        # Do not include either value in diagnostics: this may be a password.
-        observed = self.text_content()
-        postcondition = (
-            len(observed) == len(value) if role == _PASSWORD_ROLE else observed == value
+        wait, started, deadline = self._deadline(timeout)
+        role = self._operate(
+            write,
+            timeout=self._remaining_ms(deadline),
+            actionable=True,
+            interface=AccessibleInterface.TEXT,
         )
-        if not postcondition:
-            raise LocatorError("fill postcondition was not observed")
+        # Do not include either value in diagnostics: this may be a password.
+        self._wait_postcondition(
+            lambda: (
+                len(self.text_content(timeout=0)) == len(value)
+                if role == _PASSWORD_ROLE
+                else self.text_content(timeout=0) == value
+            ),
+            "text updated",
+            wait,
+            started,
+            deadline,
+        )
 
-    def clear(self) -> None:
-        self.fill("")
+    def clear(self, timeout: int | None = None) -> None:
+        self.fill("", timeout=timeout)
 
-    def text_content(self) -> str:
+    def text_content(self, timeout: int | None = None) -> str:
         """Read AccessibleText, falling back to description and then name."""
 
         def read(
@@ -1038,27 +1222,52 @@ class Locator:
                     return text
             return snapshot.description or snapshot.name
 
-        return self._operate(read)
+        return self._operate(read, timeout=timeout)
 
-    def is_checked(self) -> bool:
-        return "checked" in self.snapshot().states
+    def accessible_value(self, timeout: int | None = None) -> AccessibleValueSnapshot:
+        def read(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            _snapshot: ElementSnapshot,
+        ) -> AccessibleValueSnapshot:
+            current, minimum, maximum = runtime.accessible_value_range(ref)
+            if current is None or minimum is None or maximum is None:
+                raise NativeCallError("getAccessibleValue", reason="incomplete value")
+            return AccessibleValueSnapshot(current, minimum, maximum)
 
-    def is_selected(self) -> bool:
-        return "selected" in self.snapshot().states
+        return self._operate(
+            read,
+            timeout=timeout,
+            interface=AccessibleInterface.VALUE,
+        )
 
-    def check(self) -> None:
-        if not self.is_checked():
-            self.click()
-        if not self.is_checked():
-            raise LocatorError("check postcondition was not observed")
+    def is_checked(self, timeout: int | None = None) -> bool:
+        return "checked" in self.snapshot(timeout=timeout).states
 
-    def uncheck(self) -> None:
-        if self.is_checked():
-            self.click()
-        if self.is_checked():
-            raise LocatorError("uncheck postcondition was not observed")
+    def is_selected(self, timeout: int | None = None) -> bool:
+        return "selected" in self.snapshot(timeout=timeout).states
 
-    def select_option(self, option: str | int) -> None:
+    def check(self, timeout: int | None = None) -> None:
+        wait, started, deadline = self._deadline(timeout)
+        if not self.is_checked(timeout=0):
+            self.click(timeout=self._remaining_ms(deadline))
+        self._wait_postcondition(
+            lambda: self.is_checked(timeout=0), "checked", wait, started, deadline
+        )
+
+    def uncheck(self, timeout: int | None = None) -> None:
+        wait, started, deadline = self._deadline(timeout)
+        if self.is_checked(timeout=0):
+            self.click(timeout=self._remaining_ms(deadline))
+        self._wait_postcondition(
+            lambda: not self.is_checked(timeout=0),
+            "unchecked",
+            wait,
+            started,
+            deadline,
+        )
+
+    def select_option(self, option: str | int, timeout: int | None = None) -> None:
         """Select one direct child by exact accessible name or zero-based index."""
         if isinstance(option, bool) or not isinstance(option, (str, int)):
             raise TypeError("option must be an exact name or zero-based index")
@@ -1092,13 +1301,46 @@ class Locator:
                 index = matches[0]
             runtime.clear_selection(ref)
             runtime.set_child_selected(ref, index, True)
-            if not runtime.is_child_selected(ref, index):
-                raise LocatorError("selection postcondition was not observed")
 
-        self._operate(select)
+        wait, started, deadline = self._deadline(timeout)
+        self._operate(
+            select,
+            timeout=self._remaining_ms(deadline),
+            actionable=True,
+            interface=AccessibleInterface.SELECTION,
+        )
+        self._wait_postcondition(
+            lambda: self._selected_option(option),
+            f"option {option!r} selected",
+            wait,
+            started,
+            deadline,
+        )
 
-    def get_attribute(self, name: str) -> object:
-        snapshot = self.snapshot()
+    def _selected_option(self, option: str | int) -> bool:
+        def read(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            _snapshot: ElementSnapshot,
+        ) -> bool:
+            info = runtime.context_info(ref)
+            if isinstance(option, int):
+                return runtime.is_child_selected(ref, option)
+            for index in range(info.children_count):
+                child = runtime.child(ref, index)
+                if child is None:
+                    continue
+                try:
+                    if runtime.context_info(child).name == option:
+                        return runtime.is_child_selected(ref, index)
+                finally:
+                    child.close()
+            return False
+
+        return self._operate(read, timeout=0)
+
+    def get_attribute(self, name: str, timeout: int | None = None) -> object:
+        snapshot = self.snapshot(timeout=timeout)
         attributes: dict[str, object] = {
             "name": snapshot.name,
             "description": snapshot.description,
@@ -1118,26 +1360,45 @@ class Locator:
         """Interpret the strict locator target through AccessibleTable."""
         return TableLocator(self)
 
-    def click(self, *, opens_window: bool = False) -> None:
+    def click(self, *, opens_window: bool = False, timeout: int | None = None) -> None:
         """Click the strict target semantically or with opt-in Win32 input."""
         if not isinstance(opens_window, bool):
             raise ValueError("opens_window must be a bool")
         if opens_window:
-            self._click_with_mouse()
+            self._click_with_mouse(timeout)
             return
+
+        def perform(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            _snapshot: ElementSnapshot,
+        ) -> None:
+            actions = runtime.accessible_actions(ref)
+            action = next(
+                (candidate for candidate in actions if candidate.casefold() == "click"),
+                None,
+            )
+            if action is None and len(actions) == 1:
+                action = actions[0]
+            if action is None:
+                raise UnsupportedActionError(
+                    f"locator has no click action; available actions: {actions!r}"
+                )
+            runtime.do_accessible_actions(ref, (action,))
+
+        wait, _started, deadline = self._deadline(timeout)
         for attempt in range(2):
-            match = self._wait_strict(self._window._timeout)
-            self._check_actionable(match.snapshot, require_action=True)
             try:
-                self._perform_semantic_click(match)
+                self._operate(
+                    perform,
+                    timeout=wait if attempt == 0 else self._remaining_ms(deadline),
+                    actionable=True,
+                    interface=AccessibleInterface.ACTION,
+                )
                 return
             except NativeCallError as error:
-                if attempt or error.function not in {
-                    "getAccessibleContextInfo",
-                    "getAccessibleActions",
-                }:
+                if attempt or error.function != "getAccessibleActions":
                     raise
-        raise AssertionError("unreachable")
 
     @staticmethod
     def _check_actionable(
@@ -1167,6 +1428,13 @@ class Locator:
             owned: JavaRef | None = None
             try:
                 for index in match.path:
+                    self._check_actionable(
+                        _snapshot(
+                            runtime.context_info(current),
+                            self._window._api._registry,
+                        ),
+                        require_action=False,
+                    )
                     child = runtime.child(current, index)
                     if child is None:
                         raise NativeCallError(
@@ -1202,8 +1470,8 @@ class Locator:
                 if owned is not None:
                     owned.close()
 
-    def _click_with_mouse(self) -> None:
-        match = self._wait_strict(self._window._timeout)
+    def _click_with_mouse(self, timeout: int | None = None) -> None:
+        match = self._wait_strict(self._timeout_ms(timeout))
         snapshot = match.snapshot
         self._check_actionable(snapshot, require_action=False)
         if snapshot.width <= 0 or snapshot.height <= 0:
@@ -1227,6 +1495,42 @@ class Locator:
                         windows.set_cursor_position(*previous_cursor)
                 finally:
                     windows.set_thread_dpi_awareness_context(previous_dpi)
+
+    def scroll(self, steps: int, timeout: int | None = None) -> None:
+        """Send explicit wheel input over the current target centre."""
+        if isinstance(steps, bool) or not isinstance(steps, int):
+            raise TypeError("steps must be an integer")
+        if steps == 0:
+            return
+
+        def wheel(
+            _runtime: _RuntimeFacade,
+            _ref: JavaRef,
+            snapshot: ElementSnapshot,
+        ) -> None:
+            if snapshot.width <= 0 or snapshot.height <= 0:
+                raise LocatorError("locator has empty bounds and cannot be scrolled")
+            x = snapshot.x + snapshot.width // 2
+            y = snapshot.y + snapshot.height // 2
+            windows = self._window._api._windows
+            with _SYNTHETIC_INPUT_LOCK:
+                previous_dpi = windows.set_thread_dpi_awareness_context(
+                    _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+                )
+                previous_cursor: tuple[int, int] | None = None
+                try:
+                    previous_cursor = windows.get_cursor_position()
+                    windows.set_foreground_window(self._window.hwnd)
+                    windows.set_cursor_position(x, y)
+                    windows.send_mouse_wheel(-steps * _WHEEL_DELTA)
+                finally:
+                    try:
+                        if previous_cursor is not None:
+                            windows.set_cursor_position(*previous_cursor)
+                    finally:
+                        windows.set_thread_dpi_awareness_context(previous_dpi)
+
+        self._operate(wheel, timeout=timeout, actionable=True)
 
     def is_visible(self) -> bool:
         matches = self._resolve_immediate()
@@ -1272,7 +1576,10 @@ class Locator:
         return state == "attached" or "visible" in match.snapshot.states
 
     def _wait_strict(self, timeout: int) -> _Match:
-        deadline = time.monotonic() + timeout / 1_000
+        return self._wait_strict_until(time.monotonic() + timeout / 1_000, timeout)
+
+    def _wait_strict_until(self, deadline: float, timeout: int) -> _Match:
+        started = deadline - timeout / 1_000
         while True:
             try:
                 matches = self._resolve_immediate()
@@ -1282,7 +1589,7 @@ class Locator:
                 return self._strict(matches)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._raise_timeout("attached", timeout)
+                self._raise_timeout("attached", timeout, started=started)
             self._window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
     def _strict(self, matches: list[_Match]) -> _Match:
@@ -1296,11 +1603,30 @@ class Locator:
             f"locator resolved to {count} nodes; expected exactly one\n{diagnostic}"
         )
 
-    def _raise_timeout(self, state: str, timeout: int) -> None:
+    def _raise_timeout(
+        self,
+        state: str,
+        timeout: int,
+        *,
+        started: float | None = None,
+        last_state: object = None,
+    ) -> None:
         diagnostic = self._diagnostic()
+        elapsed_ms = int(
+            ((time.monotonic() - started) * 1_000) if started is not None else timeout
+        )
+        runtime = self._window._api._runtime
         raise LocatorTimeoutError(
             f"timed out after {timeout} ms waiting for locator to be {state}\n"
-            f"{diagnostic}"
+            f"{diagnostic}",
+            locator=repr(self._chain),
+            expected=state,
+            last_state=last_state,
+            elapsed_ms=elapsed_ms,
+            tree=diagnostic,
+            hwnd=self._window.hwnd,
+            pid=self._window.application.pid,
+            generation=None if runtime is None else runtime.generation,
         )
 
     def _diagnostic(self) -> str:
@@ -1402,13 +1728,38 @@ class Locator:
         )
         if consider and query.matches(raw_snapshot):
             matches.append(_Match(path, _snapshot(info, self._window._api._registry)))
+        visible = (
+            self._window._api._bridge.visible_children(ref)
+            if "manages descendants" in raw_snapshot.states
+            else None
+        )
+        if visible is not None:
+            try:
+                for child in visible:
+                    child_info = _context_info(self._window._api._bridge, child)
+                    index = child_info.index_in_parent
+                    if index < 0:
+                        raise _StaleContext
+                    self._walk(
+                        child,
+                        (*path, index),
+                        depth + 1,
+                        query,
+                        True,
+                        matches,
+                        seen,
+                    )
+            finally:
+                for child in reversed(visible):
+                    child.close()
+            return
         for index in range(info.children_count):
-            child = self._window._api._bridge.child(ref, index)
-            if child is None:
+            ordinary_child = self._window._api._bridge.child(ref, index)
+            if ordinary_child is None:
                 raise _StaleContext
-            with child:
+            with ordinary_child:
                 self._walk(
-                    child,
+                    ordinary_child,
                     (*path, index),
                     depth + 1,
                     query,
@@ -1483,6 +1834,9 @@ class TableLocator:
     def _with_table(
         self,
         operation: Callable[[_RuntimeFacade, JavaRef, JavaRef, int, int], _Result],
+        *,
+        timeout: int | None = None,
+        actionable: bool = False,
     ) -> _Result:
         def invoke(
             runtime: _RuntimeFacade,
@@ -1501,13 +1855,24 @@ class TableLocator:
             finally:
                 self._close_refs(refs)
 
-        return self._locator._operate(invoke)
+        return self._locator._operate(
+            invoke,
+            timeout=timeout,
+            actionable=actionable,
+            interface=AccessibleInterface.TABLE,
+        )
 
-    def row_count(self) -> int:
-        return self._with_table(lambda _runtime, _context, _table, rows, _cols: rows)
+    def row_count(self, timeout: int | None = None) -> int:
+        return self._with_table(
+            lambda _runtime, _context, _table, rows, _cols: rows,
+            timeout=timeout,
+        )
 
-    def column_count(self) -> int:
-        return self._with_table(lambda _runtime, _context, _table, _rows, cols: cols)
+    def column_count(self, timeout: int | None = None) -> int:
+        return self._with_table(
+            lambda _runtime, _context, _table, _rows, cols: cols,
+            timeout=timeout,
+        )
 
     def cell(self, row: int, column: int) -> TableCellLocator:
         self._validate_index(row, column)
@@ -1516,15 +1881,11 @@ class TableLocator:
     def row_header(self, row: int) -> TableCellLocator:
         if isinstance(row, bool) or not isinstance(row, int) or row < 0:
             raise TableIndexError("row index must be a non-negative integer")
-        if row >= self.row_count():
-            raise TableIndexError(f"row {row} is outside the table")
         return TableCellLocator(self, row, 0, header="row")
 
     def column_header(self, column: int) -> TableCellLocator:
         if isinstance(column, bool) or not isinstance(column, int) or column < 0:
             raise TableIndexError("column index must be a non-negative integer")
-        if column >= self.column_count():
-            raise TableIndexError(f"column {column} is outside the table")
         return TableCellLocator(self, 0, column, header="column")
 
     def _validate_index(self, row: int, column: int) -> None:
@@ -1533,28 +1894,24 @@ class TableLocator:
             for value in (row, column)
         ):
             raise TableIndexError("table indices must be non-negative integers")
-        rows = self.row_count()
-        columns = self.column_count()
-        if row >= rows or column >= columns:
-            raise TableIndexError(
-                f"cell ({row}, {column}) is outside table {rows}x{columns}"
-            )
 
-    def selected_rows(self) -> tuple[int, ...]:
+    def selected_rows(self, timeout: int | None = None) -> tuple[int, ...]:
         return self._with_table(
             lambda runtime, _context, table, _rows, _columns: runtime.table_selections(
                 table, column=False
-            )
+            ),
+            timeout=timeout,
         )
 
-    def selected_columns(self) -> tuple[int, ...]:
+    def selected_columns(self, timeout: int | None = None) -> tuple[int, ...]:
         return self._with_table(
             lambda runtime, _context, table, _rows, _columns: runtime.table_selections(
                 table, column=True
-            )
+            ),
+            timeout=timeout,
         )
 
-    def _select_row(self, row: int, selected: bool) -> None:
+    def _select_row(self, row: int, selected: bool, timeout: int | None = None) -> None:
         if isinstance(row, bool) or not isinstance(row, int) or row < 0:
             raise TableIndexError("row index must be a non-negative integer")
 
@@ -1569,30 +1926,49 @@ class TableLocator:
                 raise TableIndexError(f"row {row} is outside the table")
             runtime.set_table_row_selected(context, row, selected)
 
-        self._with_table(select)
-        observed = row in self.selected_rows()
-        if observed != selected:
-            raise LocatorError("row selection postcondition was not observed")
+        wait, started, deadline = self._locator._deadline(timeout)
+        self._with_table(
+            select,
+            timeout=self._locator._remaining_ms(deadline),
+            actionable=True,
+        )
+        self._locator._wait_postcondition(
+            lambda: (row in self.selected_rows(timeout=0)) == selected,
+            f"row {row} selection={selected}",
+            wait,
+            started,
+            deadline,
+        )
 
-    def select_row(self, row: int) -> None:
-        self._select_row(row, True)
+    def select_row(self, row: int, timeout: int | None = None) -> None:
+        self._select_row(row, True, timeout)
 
-    def unselect_row(self, row: int) -> None:
-        self._select_row(row, False)
+    def unselect_row(self, row: int, timeout: int | None = None) -> None:
+        self._select_row(row, False, timeout)
 
-    def snapshot(self) -> TableSnapshot:
-        rows = self.row_count()
-        columns = self.column_count()
+    def snapshot(self, timeout: int | None = None) -> TableSnapshot:
+        wait, _started, deadline = self._locator._deadline(timeout)
+        rows = self.row_count(timeout=wait)
+        columns = self.column_count(timeout=self._locator._remaining_ms(deadline))
         cells = tuple(
-            tuple(self.cell(row, column).text_content() for column in range(columns))
+            tuple(
+                self.cell(row, column).text_content(
+                    timeout=self._locator._remaining_ms(deadline)
+                )
+                for column in range(columns)
+            )
             for row in range(rows)
         )
         return TableSnapshot(
             row_count=rows,
             column_count=columns,
             cells=cells,
-            selected_rows=self.selected_rows(),
-            selected_columns=self.selected_columns(),
+            selected_rows=self.selected_rows(
+                timeout=self._locator._remaining_ms(deadline)
+            ),
+            selected_columns=self.selected_columns(
+                timeout=self._locator._remaining_ms(deadline)
+            ),
         )
 
 
@@ -1615,23 +1991,32 @@ class TableCellLocator:
     def _operate(
         self,
         operation: Callable[[_RuntimeFacade, JavaRef, JavaRef, TableCellInfo], _Result],
+        *,
+        timeout: int | None = None,
+        actionable: bool = False,
     ) -> _Result:
         def with_table(
             runtime: _RuntimeFacade,
             context: JavaRef,
             table: JavaRef,
-            _rows: int,
-            _columns: int,
+            rows: int,
+            columns: int,
         ) -> _Result:
             extra_refs: tuple[JavaRef | None, ...] = ()
             if self._header is not None:
                 header = runtime.table_header(context, column=self._header == "column")
                 if header is None or header[2][2] is None or header[2][3] is None:
                     raise UnsupportedActionError("table header is not available")
+                rows, columns = header[:2]
                 extra_refs = header[2]
                 context = cast("JavaRef", extra_refs[2])
                 table = cast("JavaRef", extra_refs[3])
             try:
+                if self.row >= rows or self.column >= columns:
+                    raise TableIndexError(
+                        f"cell ({self.row}, {self.column}) is outside "
+                        f"table {rows}x{columns}"
+                    )
                 cell_ref, info = runtime.table_cell(table, self.row, self.column)
                 try:
                     return operation(runtime, context, cell_ref, info)
@@ -1640,9 +2025,13 @@ class TableCellLocator:
             finally:
                 TableLocator._close_refs(extra_refs)
 
-        return self._table._with_table(with_table)
+        return self._table._with_table(
+            with_table,
+            timeout=timeout,
+            actionable=actionable,
+        )
 
-    def text_content(self) -> str:
+    def text_content(self, timeout: int | None = None) -> str:
         def read(
             runtime: _RuntimeFacade,
             _context: JavaRef,
@@ -1656,12 +2045,15 @@ class TableCellLocator:
                     return text
             return info.description or info.name
 
-        return self._operate(read)
+        return self._operate(read, timeout=timeout)
 
-    def is_selected(self) -> bool:
-        return self._operate(lambda _runtime, _context, _cell, info: info.selected)
+    def is_selected(self, timeout: int | None = None) -> bool:
+        return self._operate(
+            lambda _runtime, _context, _cell, info: info.selected,
+            timeout=timeout,
+        )
 
-    def _set_selected(self, selected: bool) -> None:
+    def _set_selected(self, selected: bool, timeout: int | None = None) -> None:
         def select(
             runtime: _RuntimeFacade,
             context: JavaRef,
@@ -1671,21 +2063,31 @@ class TableCellLocator:
             runtime.set_child_selected(context, info.index, selected)
 
         try:
-            self._operate(select)
+            wait, started, deadline = self._table._locator._deadline(timeout)
+            self._operate(
+                select,
+                timeout=self._table._locator._remaining_ms(deadline),
+                actionable=True,
+            )
         except NativeCallError as error:
             if error.function == "getAccessibleTableCellInfo":
                 raise UnsupportedActionError(
                     "table cell is not materialized for selection"
                 ) from None
             raise
-        if self.is_selected() != selected:
-            raise LocatorError("cell selection postcondition was not observed")
+        self._table._locator._wait_postcondition(
+            lambda: self.is_selected(timeout=0) == selected,
+            f"cell selection={selected}",
+            wait,
+            started,
+            deadline,
+        )
 
-    def select(self) -> None:
-        self._set_selected(True)
+    def select(self, timeout: int | None = None) -> None:
+        self._set_selected(True, timeout)
 
-    def unselect(self) -> None:
-        self._set_selected(False)
+    def unselect(self, timeout: int | None = None) -> None:
+        self._set_selected(False, timeout)
 
     def wait_for_text(self, text: str, timeout: int | None = None) -> None:
         if not isinstance(text, str):
@@ -1695,7 +2097,9 @@ class TableCellLocator:
         deadline = time.monotonic() + wait / 1_000
         last = ""
         while True:
-            last = self.text_content()
+            last = self.text_content(
+                timeout=self._table._locator._remaining_ms(deadline)
+            )
             if last == text:
                 return
             remaining = deadline - time.monotonic()
@@ -1746,6 +2150,7 @@ def _snapshot(
         accessible_selection=info.accessible_selection,
         accessible_text=info.accessible_text,
         accessible_interfaces=info.accessible_interfaces,
+        children_count=info.children_count,
     )
 
 
@@ -1761,6 +2166,12 @@ def _format_tree(root: AccessibilityNode) -> str:
             attributes.append(f"description={snapshot.description!r}")
         if snapshot.states:
             attributes.append(f"states={','.join(sorted(snapshot.states))!r}")
+        attributes.append(
+            f"bounds={(snapshot.x, snapshot.y, snapshot.width, snapshot.height)!r}"
+        )
+        attributes.append(f"children_count={snapshot.children_count}")
+        if snapshot.interfaces:
+            attributes.append(f"interfaces={','.join(sorted(snapshot.interfaces))!r}")
         lines.append(f"{'  ' * depth}- " + " ".join(attributes))
         for child in node.children:
             append(child, depth + 1)

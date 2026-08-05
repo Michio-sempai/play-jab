@@ -58,6 +58,7 @@ line-length = 88
 src = ["src", "tests"]
 
 [tool.ruff.lint]
+external = ["WPS"]
 select = [
     "E", "F", "W",   # pycodestyle / pyflakes
     "I",             # isort (import sorting)

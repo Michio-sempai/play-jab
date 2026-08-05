@@ -101,6 +101,29 @@ class StrictModeViolation(LocatorError):
 class LocatorTimeoutError(LocatorError):
     """A locator condition was not met before its deadline."""
 
+    def __init__(  # noqa: PLR0913, WPS211
+        self,
+        message: str,
+        *,
+        locator: str | None = None,
+        expected: str | None = None,
+        last_state: object = None,
+        elapsed_ms: int | None = None,
+        tree: str | None = None,
+        hwnd: int | None = None,
+        pid: int | None = None,
+        generation: int | None = None,
+    ) -> None:
+        self.locator = locator
+        self.expected = expected
+        self.last_state = last_state
+        self.elapsed_ms = elapsed_ms
+        self.tree = tree
+        self.hwnd = hwnd
+        self.pid = pid
+        self.generation = generation
+        super().__init__(message)
+
 
 class UnsupportedActionError(LocatorError):
     """A locator target does not expose a suitable accessible action."""
