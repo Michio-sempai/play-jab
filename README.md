@@ -96,6 +96,25 @@ be read explicitly, but is redacted from dumps, snapshots, logs, and errors.
 Table indices are zero-based; `as_table()` exposes dimensions, snapshots,
 headers, row selection, cells, and cell text waits.
 
+Reads (`snapshot`, `text_content`, attributes, table cells) also work for hidden
+or disabled nodes. Actions require the target and every ancestor to be visible,
+showing, and enabled. Every resolving operation accepts `timeout=`; `0` performs
+one immediate check. `LocatorTimeoutError` carries structured, bounded and
+password-redacted diagnostics.
+
+Virtualized lists and trees expose only currently materialized children. Move
+their viewport explicitly and resolve the lazy locator again; play-jab does not
+auto-scroll while searching. Wheel input and read-only values are explicit:
+
+```python
+scrollbar = window.get_by_name("jobs.scrollbar")
+print(scrollbar.accessible_value())
+window.get_by_name("jobs.list").scroll(6)
+```
+
+Positive `scroll()` steps move down and negative steps move up. Cursor position
+and DPI context are restored even when Win32 input fails.
+
 `click()` uses the element's synchronous JAB `AccessibleAction`. When its
 handler opens a modal `JDialog`, the call can remain blocked until that dialog
 closes; no other operation can use the serialized bridge worker meanwhile.

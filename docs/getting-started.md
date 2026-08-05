@@ -85,6 +85,21 @@ indices raise `TableIndexError`.
 Do not import from `play_jab._native`: its names, signatures, and lifecycle
 contracts may change without notice.
 
+## Deadlines, virtualization, and scrolling
+
+All reads and actions that resolve a locator accept a millisecond `timeout`.
+The nearest value wins: call, then `JavaWindow`, then `PlayJab`; `timeout=0`
+means one immediate observation. Reads are permitted for hidden and disabled
+nodes, while actions validate the target and its ancestor chain. On timeout,
+inspect the structured fields on `LocatorTimeoutError`; its bounded tree is
+best-effort and password metadata is redacted.
+
+For a virtualized list or tree, only materialized children can be found. Use
+`locator.scroll(steps)` to send wheel input over an actionable viewport and
+then resolve the item again. Positive steps scroll down, negative steps scroll
+up, and zero is a no-op. Scrollbar `accessible_value()` returns immutable
+`current`, `minimum`, and `maximum` strings; JDK 17 JAB has no supported setter.
+
 ## Troubleshooting
 
 | Symptom or exception | What to check |
