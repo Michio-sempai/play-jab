@@ -45,12 +45,21 @@ release month plus a release counter within that month:
 ## Release
 
 ```sh
-uv run bumpver update --patch                    # regular release: 2026.08.0 -> 2026.08.1
-uv run bumpver update --patch --tag=rc --tag-num  # pre-release:    2026.08.0 -> 2026.08.1rc0
-# bumps the version in pyproject.toml, commits, and tags v<version> (push is off by default)
-git push origin main --tags       # triggers the CI `release` job -> publish to PyPI on tag
-uv run cz changelog                # (optional) collect commits into CHANGELOG.md
+OLD_VERSION=2026.08.1
+NEW_VERSION=2026.08.2
+uv run bumpver update --patch
+uv run cz changelog --start-rev "v$OLD_VERSION" --unreleased-version "v$NEW_VERSION"
+git add pyproject.toml CHANGELOG.md
+git commit -m "chore: release $NEW_VERSION"
+git tag -a "v$NEW_VERSION" -m "v$NEW_VERSION"
+git push origin dev
+git push origin "v$NEW_VERSION"  # triggers release only after the branch CI is green
 ```
+
+`bumpver` only edits version fields. The changelog, release commit, and annotated
+`v<version>` tag are explicit steps so the tag cannot be created before release
+notes are generated. The CI `release` job rejects a tag whose version is absent
+from `CHANGELOG.md`.
 
 For the first release of a new month, `PATCH` resets on its own, so a plain
 `uv run bumpver update` is enough.

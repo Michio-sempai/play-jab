@@ -100,6 +100,7 @@ name = "cz_conventional_commits"
 version_provider = "pep621"
 version_scheme = "pep440"
 tag_format = "v$version"
+ignored_tag_formats = ["ai_version"]
 
 # Calendar versioning: YYYY.MM.PATCH[PYTAGNUM], e.g. 2026.08.0, 2026.08.1, 2026.09.0.
 # PATCH resets to 0 whenever YYYY.MM changes and otherwise only bumps when explicitly
@@ -111,9 +112,8 @@ tag_format = "v$version"
 current_version = "2026.08.1"
 version_pattern = "YYYY.0M.PATCH[PYTAGNUM]"
 commit_message = "bump version to {new_version}"
-tag_message = "v{new_version}"
-commit = true
-tag = true
+commit = false
+tag = false
 push = false
 
 [tool.bumpver.file_patterns]

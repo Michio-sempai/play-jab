@@ -113,6 +113,7 @@ release:
     - |
       PACKAGE_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
       test "$CI_COMMIT_TAG" = "v$PACKAGE_VERSION"
+      grep -Fq "## v$PACKAGE_VERSION (" CHANGELOG.md
     - |
       cat > mint_token.py <<'PY'
       import json
