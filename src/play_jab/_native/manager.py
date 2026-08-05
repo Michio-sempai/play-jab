@@ -8,9 +8,11 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import TypeVar, cast
 
+from play_jab._native.backend import ContextInfo, TableCellInfo
 from play_jab._native.bridge import BridgeRuntime
+from play_jab._native.refs import JavaRef
 from play_jab.exceptions import BridgeClosedError, BridgeInitializationError
 
 __all__ = ["RuntimeManager", "RuntimeSession"]
@@ -68,6 +70,10 @@ class RuntimeSession:
     def live_ref_count(self) -> int:
         return self._invoke(lambda: self._runtime.live_ref_count)
 
+    @property
+    def generation(self) -> int:
+        return self._generation
+
     def _invoke(self, function: Callable[[], _T]) -> _T:
         self._manager._enter(self._lease_id, self._generation)
         try:
@@ -75,15 +81,74 @@ class RuntimeSession:
         finally:
             self._manager._leave(self._lease_id)
 
-    def __getattr__(self, name: str) -> Any:
-        attribute = getattr(self._runtime, name)
-        if not callable(attribute):
-            return self._invoke(lambda: attribute)
+    def wait_for_event(self, timeout: float) -> None:
+        self._invoke(lambda: self._runtime.wait_for_event(timeout))
 
-        def guarded(*args: object, **kwargs: object) -> object:
-            return self._invoke(lambda: attribute(*args, **kwargs))
+    def is_java_window(self, hwnd: int) -> bool:
+        return self._invoke(lambda: self._runtime.is_java_window(hwnd))
 
-        return guarded
+    def is_vm_exited_window(self, hwnd: int) -> bool:
+        return self._invoke(lambda: self._runtime.is_vm_exited_window(hwnd))
+
+    def context_from_hwnd(self, hwnd: int) -> JavaRef:
+        return self._invoke(lambda: self._runtime.context_from_hwnd(hwnd))
+
+    def context_info(self, ref: JavaRef) -> ContextInfo:
+        return self._invoke(lambda: self._runtime.context_info(ref))
+
+    def child(self, ref: JavaRef, index: int) -> JavaRef | None:
+        return self._invoke(lambda: self._runtime.child(ref, index))
+
+    def accessible_actions(self, ref: JavaRef) -> tuple[str, ...]:
+        return self._invoke(lambda: self._runtime.accessible_actions(ref))
+
+    def do_accessible_actions(self, ref: JavaRef, actions: tuple[str, ...]) -> None:
+        self._invoke(lambda: self._runtime.do_accessible_actions(ref, actions))
+
+    def accessible_text(self, ref: JavaRef) -> str | None:
+        return self._invoke(lambda: self._runtime.accessible_text(ref))
+
+    def accessible_value_range(
+        self, ref: JavaRef
+    ) -> tuple[str | None, str | None, str | None]:
+        return self._invoke(lambda: self._runtime.accessible_value_range(ref))
+
+    def set_text_contents(self, ref: JavaRef, text: str) -> None:
+        self._invoke(lambda: self._runtime.set_text_contents(ref, text))
+
+    def request_focus(self, ref: JavaRef) -> None:
+        self._invoke(lambda: self._runtime.request_focus(ref))
+
+    def clear_selection(self, ref: JavaRef) -> None:
+        self._invoke(lambda: self._runtime.clear_selection(ref))
+
+    def set_child_selected(self, ref: JavaRef, index: int, selected: bool) -> None:
+        self._invoke(lambda: self._runtime.set_child_selected(ref, index, selected))
+
+    def is_child_selected(self, ref: JavaRef, index: int) -> bool:
+        return self._invoke(lambda: self._runtime.is_child_selected(ref, index))
+
+    def table_info(self, ref: JavaRef) -> tuple[int, int, tuple[JavaRef | None, ...]]:
+        return self._invoke(lambda: self._runtime.table_info(ref))
+
+    def table_cell(
+        self, table_ref: JavaRef, row: int, column: int
+    ) -> tuple[JavaRef, TableCellInfo]:
+        return self._invoke(lambda: self._runtime.table_cell(table_ref, row, column))
+
+    def table_header(
+        self, ref: JavaRef, *, column: bool
+    ) -> tuple[int, int, tuple[JavaRef | None, ...]] | None:
+        return self._invoke(lambda: self._runtime.table_header(ref, column=column))
+
+    def table_selections(self, ref: JavaRef, *, column: bool) -> tuple[int, ...]:
+        return self._invoke(lambda: self._runtime.table_selections(ref, column=column))
+
+    def set_table_row_selected(self, ref: JavaRef, row: int, selected: bool) -> None:
+        self._invoke(lambda: self._runtime.set_table_row_selected(ref, row, selected))
+
+    def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...] | None:
+        return self._invoke(lambda: self._runtime.visible_children(ref))
 
     def close(self) -> None:
         if self._closed:
