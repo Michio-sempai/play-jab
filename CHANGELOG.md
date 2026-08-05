@@ -1,3 +1,22 @@
+## v2026.08.3 (2026-08-05)
+
+### Feat
+
+- add deadline-aware read/action locators, postcondition waits, structured
+  redacted timeout diagnostics, and explicit wheel scrolling
+- add read-only AccessibleValue current/minimum/maximum snapshots
+- add materialized visible-child traversal and lazy table cell/header bounds
+- extend the Swing fixture with virtual list/tree, deterministic dynamic state,
+  table row mutation, and a function-scoped JVM lifecycle launcher
+
+### Breaking
+
+- locator reads no longer require actionable states; actions validate the full
+  ancestor chain and required Accessible interface
+- resolving APIs now accept per-call `timeout`; table upper bounds are checked
+  when a lazy cell/header is operated, not when it is created
+- replace the untyped runtime-session forwarding hook with an explicit typed facade
+
 ## v2026.08.2 (2026-08-05)
 
 ### Feat
