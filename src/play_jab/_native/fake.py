@@ -66,6 +66,7 @@ class FakeNode:
     accessible_selection: bool = False
     accessible_text: bool = False
     accessible_interfaces: int = 0
+    actions: tuple[str, ...] = ()
     children: list[FakeNode] = field(default_factory=list)
 
     @property
@@ -96,6 +97,7 @@ class FakeBackend:
         self.pump_turns = 0
         self.acquired = 0
         self.released = 0
+        self.performed_actions: list[tuple[int, str]] = []
 
         self._windows: dict[int, FakeNode] = dict(windows or {})
         self._live: dict[int, FakeNode] = {}
@@ -257,6 +259,24 @@ class FakeBackend:
         if node is None:
             return 0
         return self._root_hwnds.get(id(node), 0)
+
+    def get_accessible_actions(
+        self, vm_id: int, context: int
+    ) -> tuple[str, ...] | None:
+        node = self._resolve(vm_id, context)
+        return None if node is None else node.actions
+
+    def do_accessible_actions(
+        self, vm_id: int, context: int, actions: tuple[str, ...]
+    ) -> tuple[bool, int]:
+        node = self._resolve(vm_id, context)
+        if node is None:
+            return False, 0
+        for index, action in enumerate(actions):
+            if action not in node.actions:
+                return False, index
+            self.performed_actions.append((context, action))
+        return True, -1
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1

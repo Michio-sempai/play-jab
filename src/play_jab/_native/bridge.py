@@ -76,9 +76,10 @@ class BridgeRuntime:
     is a correctness requirement, not a performance choice - calling the bridge
     from arbitrary Python threads is undefined behaviour.
 
-    A running message pump is necessary, not sufficient: it does not, for
-    example, prevent ``doAccessibleActions`` from blocking when a Java handler
-    synchronously opens a modal dialog.
+    A running message pump is necessary, not sufficient. In particular,
+    ``doAccessibleActions`` may stay blocked when the invoked handler opens a
+    modal dialog synchronously. Since calls share one serialized worker, no
+    other JAB operation can proceed until that action returns.
     """
 
     def __init__(
@@ -318,13 +319,11 @@ class BridgeRuntime:
             if self._closed or self._thread is None:
                 raise BridgeClosedError(_CLOSED_MESSAGE)
             self._queue.put(call)
-        # Deliberately unbounded. A deadline here would invent failures on calls
-        # that are legitimately slow - a Java handler opening a modal dialog is
-        # the known case - and it could not repair anything either way, since an
-        # in-flight ctypes call cannot be safely cancelled (CONCEPT section 7,
-        # which leaves a watchdog to post-MVP). The specific hole this could have
-        # hidden is closed instead: _in_flight tracking guarantees that a call
-        # taken off the queue is completed even if the worker dies mid-turn.
+        # Deliberately unbounded: an in-flight ctypes call cannot be safely
+        # cancelled. A synchronous modal AccessibleAction may keep it blocked
+        # until its dialog closes.
+        # _in_flight tracking guarantees that a call taken off the queue is
+        # completed even if the worker dies mid-turn.
         call.done.wait()
         if call.error is not None:
             raise call.error
@@ -444,6 +443,45 @@ class BridgeRuntime:
 
         hwnd = self._call(operation)
         return hwnd or None
+
+    def accessible_actions(self, ref: JavaRef) -> tuple[str, ...]:
+        """Return the action names supported by ``ref``."""
+
+        def operation(backend: NativeBackend) -> tuple[str, ...]:
+            vm_id, value = self._unwrap_reference(ref)
+            actions = backend.get_accessible_actions(vm_id, value)
+            if actions is None:
+                raise NativeCallError("getAccessibleActions", vmID=vm_id, ac=value)
+            return actions
+
+        return self._call(operation)
+
+    def do_accessible_actions(
+        self,
+        ref: JavaRef,
+        actions: tuple[str, ...],
+    ) -> None:
+        """Perform the named actions and validate the DLL failure index."""
+        if not actions:
+            raise ValueError("at least one accessible action is required")
+
+        def operation(backend: NativeBackend) -> None:
+            vm_id, value = self._unwrap_reference(ref)
+            ok, failure_index = backend.do_accessible_actions(
+                vm_id,
+                value,
+                actions,
+            )
+            if not ok or failure_index != -1:
+                raise NativeCallError(
+                    "doAccessibleActions",
+                    vmID=vm_id,
+                    ac=value,
+                    actions_count=len(actions),
+                    failure_index=failure_index,
+                )
+
+        self._call(operation)
 
     def _release_java_object(self, vm_id: int, value: int) -> None:
         """Give one owned reference back to the JVM. Called by :class:`JavaRef`.

@@ -11,11 +11,19 @@ __all__ = [
     "BridgeClosedError",
     "BridgeInitializationError",
     "BridgeNotEnabledError",
+    "JavaProcessExitedError",
     "JavaReferenceClosedError",
+    "JavaWindowAmbiguousError",
     "JavaWindowNotAccessibleError",
     "JavaWindowNotFoundError",
+    "LocatorError",
+    "LocatorTimeoutError",
     "NativeCallError",
     "PlayJabError",
+    "StrictModeViolation",
+    "UnsupportedAccessibleRoleError",
+    "UnsupportedAccessibleStateError",
+    "UnsupportedActionError",
 ]
 
 
@@ -66,6 +74,38 @@ class JavaWindowNotFoundError(PlayJabError):
 
 class JavaWindowNotAccessibleError(PlayJabError):
     """The window is a Java window but exposes no accessible context."""
+
+
+class JavaProcessExitedError(PlayJabError):
+    """The Java process exited before the requested operation completed."""
+
+
+class JavaWindowAmbiguousError(PlayJabError):
+    """More than one Java window satisfies a strict window query."""
+
+
+class LocatorError(PlayJabError):
+    """An accessibility locator could not be resolved."""
+
+
+class StrictModeViolation(LocatorError):
+    """An operation requiring one node resolved to multiple nodes."""
+
+
+class LocatorTimeoutError(LocatorError):
+    """A locator condition was not met before its deadline."""
+
+
+class UnsupportedActionError(LocatorError):
+    """A locator target does not expose a suitable accessible action."""
+
+
+class UnsupportedAccessibleRoleError(PlayJabError, ValueError):
+    """A locator used a role outside the configured role registry."""
+
+
+class UnsupportedAccessibleStateError(PlayJabError, ValueError):
+    """A locator used a state outside the configured state registry."""
 
 
 class NativeCallError(PlayJabError):

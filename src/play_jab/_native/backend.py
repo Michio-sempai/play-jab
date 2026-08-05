@@ -26,7 +26,14 @@ from typing import Protocol
 
 from play_jab._native.dll import load_access_bridge, verify_exports
 from play_jab._native.functions import REQUIRED_EXPORTS, configure_functions
-from play_jab._native.types import AccessibleContext, AccessibleContextInfo
+from play_jab._native.types import (
+    MAX_ACTIONS_TO_DO,
+    AccessibleActions,
+    AccessibleActionsToDo,
+    AccessibleContext,
+    AccessibleContextInfo,
+    jint,
+)
 
 if sys.platform == "win32":
     from ctypes import wintypes as win_types
@@ -132,6 +139,16 @@ class NativeBackend(Protocol):
 
     def get_hwnd_from_accessible_context(self, vm_id: int, context: int) -> int:
         """``getHWNDFromAccessibleContext``; ``0`` when the context has no window."""
+
+    def get_accessible_actions(
+        self, vm_id: int, context: int
+    ) -> tuple[str, ...] | None:
+        """Return supported action names, or ``None`` when the call fails."""
+
+    def do_accessible_actions(
+        self, vm_id: int, context: int, actions: tuple[str, ...]
+    ) -> tuple[bool, int]:
+        """Perform actions and return ``(success, failure_index)``."""
 
     def shutdown(self) -> None:
         """Release the bridge. Must be idempotent and must not raise."""
@@ -249,6 +266,35 @@ class DllBackend:
     def get_hwnd_from_accessible_context(self, vm_id: int, context: int) -> int:
         hwnd = self._dll.getHWNDFromAccessibleContext(vm_id, context)
         return int(hwnd) if hwnd else 0
+
+    def get_accessible_actions(
+        self, vm_id: int, context: int
+    ) -> tuple[str, ...] | None:
+        raw = AccessibleActions()
+        if not self._dll.getAccessibleActions(vm_id, context, ctypes.byref(raw)):
+            return None
+        count = int(raw.actionsCount)
+        if count < 0 or count > len(raw.actionInfo):
+            return None
+        return tuple(raw.actionInfo[index].name for index in range(count))
+
+    def do_accessible_actions(
+        self, vm_id: int, context: int, actions: tuple[str, ...]
+    ) -> tuple[bool, int]:
+        if not actions or len(actions) > MAX_ACTIONS_TO_DO:
+            return False, -1
+        raw = AccessibleActionsToDo()
+        raw.actionsCount = len(actions)
+        for index, action in enumerate(actions):
+            raw.actions[index].name = action
+        failure = jint(-1)
+        ok = self._dll.doAccessibleActions(
+            vm_id,
+            context,
+            ctypes.byref(raw),
+            ctypes.byref(failure),
+        )
+        return bool(ok), int(failure.value)
 
     def shutdown(self) -> None:
         """Unload the Access Bridge DLL.

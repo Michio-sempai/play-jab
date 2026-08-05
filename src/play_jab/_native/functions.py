@@ -25,6 +25,8 @@ from typing import Final
 from play_jab._native.types import (
     BOOL,
     HWND,
+    AccessibleActions,
+    AccessibleActionsToDo,
     AccessibleContext,
     AccessibleContextInfo,
     JavaObject,
@@ -42,6 +44,8 @@ REQUIRED_EXPORTS: Final = (
     "getAccessibleParentFromContext",
     "releaseJavaObject",
     "getHWNDFromAccessibleContext",
+    "getAccessibleActions",
+    "doAccessibleActions",
 )
 
 
@@ -95,3 +99,21 @@ def configure_functions(dll: ctypes.CDLL) -> None:
     # HWND getHWNDFromAccessibleContext(long vmID, AccessibleContext ac)
     dll.getHWNDFromAccessibleContext.argtypes = [ctypes.c_long, AccessibleContext]
     dll.getHWNDFromAccessibleContext.restype = HWND
+
+    # BOOL GetAccessibleActions(long, AccessibleContext, AccessibleActions *)
+    dll.getAccessibleActions.argtypes = [
+        ctypes.c_long,
+        AccessibleContext,
+        ctypes.POINTER(AccessibleActions),
+    ]
+    dll.getAccessibleActions.restype = BOOL
+
+    # BOOL DoAccessibleActions(long, AccessibleContext,
+    #                          AccessibleActionsToDo *, jint *failure)
+    dll.doAccessibleActions.argtypes = [
+        ctypes.c_long,
+        AccessibleContext,
+        ctypes.POINTER(AccessibleActionsToDo),
+        ctypes.POINTER(jint),
+    ]
+    dll.doAccessibleActions.restype = BOOL

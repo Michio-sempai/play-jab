@@ -18,8 +18,13 @@ __all__ = [
     "BOOL",
     "HWND",
     "JOBJECT64",
+    "MAX_ACTIONS_TO_DO",
+    "MAX_ACTION_INFO",
     "MAX_STRING_SIZE",
     "SHORT_STRING_SIZE",
+    "AccessibleActionInfo",
+    "AccessibleActions",
+    "AccessibleActionsToDo",
     "AccessibleContext",
     "AccessibleContextInfo",
     "JavaObject",
@@ -30,6 +35,8 @@ __all__ = [
 # AccessBridgePackages.h
 MAX_STRING_SIZE = 1024
 SHORT_STRING_SIZE = 256
+MAX_ACTION_INFO = 256
+MAX_ACTIONS_TO_DO = 32
 
 # jni_md.h (Windows): `typedef long jint` and `typedef __int64 jlong`. Windows is
 # LLP64, so C `long` is 32-bit even in a 64-bit process; jint is therefore 32-bit
@@ -101,4 +108,28 @@ class AccessibleContextInfo(ctypes.Structure):
         ("accessibleSelection", BOOL),
         ("accessibleText", BOOL),
         ("accessibleInterfaces", BOOL),
+    )
+
+
+class AccessibleActionInfo(ctypes.Structure):
+    """One named action from ``AccessBridgePackages.h``."""
+
+    _fields_ = (("name", ctypes.c_wchar * SHORT_STRING_SIZE),)
+
+
+class AccessibleActions(ctypes.Structure):
+    """Actions supported by an accessible context."""
+
+    _fields_ = (
+        ("actionsCount", jint),
+        ("actionInfo", AccessibleActionInfo * MAX_ACTION_INFO),
+    )
+
+
+class AccessibleActionsToDo(ctypes.Structure):
+    """Bounded action list passed to ``doAccessibleActions``."""
+
+    _fields_ = (
+        ("actionsCount", jint),
+        ("actions", AccessibleActionInfo * MAX_ACTIONS_TO_DO),
     )
