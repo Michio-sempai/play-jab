@@ -1,6 +1,6 @@
 [project]
 name = "play-jab"
-version = "2026.08.1"
+version = "2026.08.2"
 description = "Playwright-style automation API for Java apps via Java Access Bridge (JAB)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -109,7 +109,7 @@ ignored_tag_formats = ["ai_version"]
 # tag glued to its number with no separator (a0, b1, rc2, post0, dev3); pass it via
 # `--tag=alpha|beta|rc|dev|post|final` (+ `--tag-num` to bump the number).
 [tool.bumpver]
-current_version = "2026.08.1"
+current_version = "2026.08.2"
 version_pattern = "YYYY.0M.PATCH[PYTAGNUM]"
 commit_message = "bump version to {new_version}"
 commit = false
