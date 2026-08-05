@@ -143,6 +143,10 @@ class DllBackend:
     def __init__(self, dll: ctypes.CDLL) -> None:
         self._dll = dll
         self._closed = False
+        if sys.platform != "win32":  # pragma: no cover - unit-test import shim
+            self._user32 = None
+            self._message = None
+            return
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._message = win_types.MSG()
         self._configure_win32()
@@ -178,6 +182,8 @@ class DllBackend:
         self._dll.Windows_run()
 
     def pump_messages(self) -> None:
+        if sys.platform != "win32":  # pragma: no cover - unit-test import shim
+            return
         pointer = ctypes.byref(self._message)
         for _ in range(_MAX_MESSAGES_PER_PUMP):
             if not self._user32.PeekMessageW(pointer, None, 0, 0, _PM_REMOVE):

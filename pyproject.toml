@@ -76,6 +76,7 @@ quote-style = "double"
 [tool.mypy]
 strict = true
 python_version = "3.11"
+platform = "win32"
 packages = ["play_jab"]
 
 [tool.pytest.ini_options]

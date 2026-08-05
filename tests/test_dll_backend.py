@@ -306,7 +306,12 @@ def test_free_library_failure_does_not_mask_load_error(
     monkeypatch.setattr(
         backend_module, "verify_exports", lambda *_args: (_ for _ in ()).throw(original)
     )
-    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: Kernel32Stub())
+    monkeypatch.setattr(
+        ctypes,
+        "WinDLL",
+        lambda *_args, **_kwargs: Kernel32Stub(),
+        raising=False,
+    )
 
     with pytest.raises(RuntimeError, match="missing export") as caught:
         DllBackend.load("bridge.dll")
