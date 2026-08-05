@@ -9,6 +9,9 @@ reference program is a separate, later job.
 from __future__ import annotations
 
 import ctypes
+import sys
+
+import pytest
 
 from play_jab._native.types import (
     BOOL,
@@ -30,6 +33,11 @@ _SHORT_STRING_BYTES = SHORT_STRING_SIZE * WCHAR_SIZE
 _STRINGS_BYTES = 2 * _LONG_STRING_BYTES + 4 * _SHORT_STRING_BYTES
 _CONTEXT_INFO_SIZE = _STRINGS_BYTES + 6 * JINT_SIZE + 5 * BOOL_SIZE
 
+windows_wchar_only = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Access Bridge struct layout uses the Windows two-byte wchar_t ABI",
+)
+
 
 def test_jobject64_is_a_64_bit_value() -> None:
     # JOBJECT64 is jlong in every non-legacy build of the bridge, in both the
@@ -43,10 +51,12 @@ def test_scalar_widths_follow_the_windows_abi() -> None:
     assert ctypes.sizeof(BOOL) == BOOL_SIZE
 
 
+@windows_wchar_only
 def test_context_info_size() -> None:
     assert ctypes.sizeof(AccessibleContextInfo) == _CONTEXT_INFO_SIZE
 
 
+@windows_wchar_only
 def test_context_info_field_offsets() -> None:
     expected = {
         "name": 0,
