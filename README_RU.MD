@@ -1,20 +1,91 @@
+<div align="center">
+
 # play-jab
 
-[English](https://gitlab.com/dashanovsd/play-jab/-/blob/main/README.md)
+**Playwright-подобная автоматизация настольных Java-приложений через Java Access Bridge**
 
-Playwright-подобный API для автоматизации Java-приложений на основе Java Access Bridge (JAB).
+[English version](README.md)
 
-## Установка
+[![Статус проекта](https://img.shields.io/badge/status-pre--alpha-orange)](#статус-проекта)
+[![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Pipeline](https://gitlab.com/dashanovsd/play-jab/badges/main/pipeline.svg)](https://gitlab.com/dashanovsd/play-jab/-/pipelines)
+[![Coverage](https://gitlab.com/dashanovsd/play-jab/badges/main/coverage.svg)](https://gitlab.com/dashanovsd/play-jab/-/graphs/main/charts)
+[![Лицензия](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-```sh
-pip install play-jab
+</div>
+
+`play-jab` — типизированная Python-библиотека для исследования и автоматизации
+настольных Java-интерфейсов в Windows. Она создаёт более безопасный современный
+API поверх нативного Java Access Bridge (JAB), управляет циклом сообщений в
+отдельном потоке и контролирует время жизни нативных ссылок.
+
+## Статус проекта
+
+> [!IMPORTANT]
+> **Pre-alpha.** Низкоуровневая основа JAB находится в активной
+> разработке, стабильный публичный API автоматизации пока отсутствует. Сейчас
+> пакет публично предоставляет иерархию исключений. Возможны несовместимые изменения.
+
+## Возможности
+
+- Нативная интеграция с Java Access Bridge для Windows
+- Поддержка Python 3.11–3.14 и строгая статическая типизация
+- Понятные ошибки настройки, окон, ссылок и нативных вызовов
+- Автоматические тесты ABI, жизненного цикла, владения ссылками и интеграции с JDK 17
+- Планируемый Playwright-подобный API на основе локаторов
+
+## Требования
+
+- Windows
+- Python 3.11 или новее
+- Среда Java с поддержкой Java Access Bridge
+- Одинаковая архитектура Python и JAB DLL: 32 или 64 бита
+
+## Быстрый старт
+
+Установите пакет:
+
+```powershell
+python -m pip install play-jab
 ```
 
-## Contributing
+Включите Java Access Bridge для текущего пользователя Windows, затем
+перезапустите Java-приложение, с которым будете работать:
 
-Как настроить окружение для разработки, прогнать линтеры/тесты и выпустить релиз — в
-[`CONTRIBUTING.md`](https://gitlab.com/dashanovsd/play-jab/-/blob/main/CONTRIBUTING.md).
+```powershell
+& "$env:JAVA_HOME\bin\jabswitch.exe" -enable
+```
 
-## License
+Проверьте импорт публичного пакета:
 
-[Apache License 2.0](https://gitlab.com/dashanovsd/play-jab/-/blob/main/LICENSE).
+```powershell
+python -c "from play_jab import PlayJabError; print(PlayJabError.__name__)"
+```
+
+Подготовка окружения, настройка JAB, доступные импорты и диагностика описаны в
+**[руководстве по началу работы](docs/getting-started.ru.md)**.
+
+## Документация
+
+- [Начало работы](docs/getting-started.ru.md)
+- [Участие в разработке](CONTRIBUTING.md)
+- [История изменений](CHANGELOG.md)
+
+Пользовательские примеры автоматизации появятся вместе со стабильным API. До
+этого модули внутри `play_jab._native` считаются деталями реализации и не должны
+импортироваться прикладным кодом.
+
+## Разработка
+
+```powershell
+uv sync --all-groups
+uv run pytest
+uv run pre-commit run --all-files
+```
+
+Все проверки, соглашения о коммитах и процесс выпуска описаны в
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Лицензия
+
+Проект распространяется по [лицензии Apache 2.0](LICENSE).
