@@ -7,7 +7,7 @@ package surface available in the current pre-alpha release.
 
 ## 1. Check the prerequisites
 
-Use Python 3.11–3.14 and a Java installation that includes Java Access Bridge.
+Use 64-bit Python 3.11–3.14 and 64-bit JDK 17 with Java Access Bridge.
 Confirm that both tools are available:
 
 ```powershell
@@ -16,7 +16,7 @@ java -version
 $env:JAVA_HOME
 ```
 
-Python and the JAB DLL must have the same architecture. Check Python with:
+Python and the external JAB DLL must both be 64-bit. Check Python with:
 
 ```powershell
 python -c "import struct; print(struct.calcsize('P') * 8, 'bit')"
@@ -36,6 +36,10 @@ Enable JAB for the current Windows user:
 Restart any running Java applications afterward. Enabling JAB does not retrofit
 accessibility support into an already running JVM.
 
+`play-jab` does not bundle Microsoft's/Oracle's JAB DLL. It resolves
+`WindowsAccessBridge-64.dll` from an explicit `dll_path`, then `JAVA_HOME`, then
+Windows `System32`; it never searches the current working directory.
+
 ## 3. Install and verify play-jab
 
 ```powershell
@@ -46,27 +50,40 @@ python -c "import play_jab; print(play_jab.__file__)"
 The second command should print the installed package path without an import
 error.
 
-## Current public surface
+## 4. Attach and automate
 
-The automation API is not public yet. Application code may currently import the
-documented exception hierarchy:
+Start the Java application yourself, then attach by exactly one HWND, PID, or
+exact top-level title. `PlayJab` is attach-only and closing it never terminates
+the target process.
 
 ```python
-from play_jab import (
-    BridgeInitializationError,
-    BridgeNotEnabledError,
-    JavaWindowNotAccessibleError,
-    JavaWindowNotFoundError,
-    PlayJabError,
-)
+from play_jab import PlayJab
 
-assert issubclass(BridgeNotEnabledError, BridgeInitializationError)
-assert issubclass(BridgeInitializationError, PlayJabError)
+with PlayJab(timeout=5_000) as jab:
+    app = jab.attach(pid=12_345)
+    window = app.window(title="Application")
+
+    username = window.get_by_name("login.username")
+    username.focus()
+    username.fill("alice")
+    window.get_by_name("login.remember").check()
+    window.get_by_name("login.role").select_option("Admin")
+    window.get_by_name("login.submit").click()
+
+    jobs = window.get_by_name("jobs.table").as_table()
+    print(jobs.snapshot())
+    jobs.select_row(7)
+    jobs.cell(7, 3).wait_for_text("Done", timeout=10_000)
 ```
 
+Locators resolve again for every operation and use exact, case-sensitive string
+matching. Form operations verify their observable postconditions. Explicit
+password `text_content()` reads are allowed, but secret values are excluded from
+snapshots, dumps, logs, and exceptions. Table indices are zero-based and invalid
+indices raise `TableIndexError`.
+
 Do not import from `play_jab._native`: its names, signatures, and lifecycle
-contracts may change without notice. Runnable automation examples will be added
-when the stable public API is introduced.
+contracts may change without notice.
 
 ## Troubleshooting
 
@@ -76,6 +93,8 @@ when the stable public API is introduced.
 | `BridgeInitializationError` | Check `JAVA_HOME`, DLL availability, and Python/JAB bitness. |
 | `JavaWindowNotFoundError` | Confirm that the HWND still exists and belongs to a Java window. |
 | `JavaWindowNotAccessibleError` | Confirm JAB was enabled before the target JVM started. |
+| `JavaProcessExitedError` | The attached operating-system process ended. Start it again and attach a new session. |
+| `JavaVmExitedError` | The attached JVM announced shutdown; old locators and references cannot be reused. |
 | `JavaReferenceClosedError` | Reacquire the element after its native reference has been released. |
 | `BridgeClosedError` | Create a new automation session; a closed runtime cannot be reused. |
 | `NativeCallError` | Inspect its function name and scalar arguments for the failing JAB operation. |
@@ -93,4 +112,18 @@ uv run pytest
 ```
 
 Real JAB integration tests additionally require an interactive Windows desktop
-and JDK 17. Contributor setup is covered in [CONTRIBUTING.md](../CONTRIBUTING.md).
+and JDK 17. They run serially with:
+
+```powershell
+$env:PLAY_JAB_RUN_INTEGRATION = "1"
+uv run pytest tests/integration
+```
+
+JVM stdout/stderr diagnostics are written under
+`tests/java-fixtures/jab-swing-app/build/integration-logs/`. Contributor setup is
+covered in [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+The GitHub real-JAB job requires a self-hosted runner labelled `windows`, `x64`,
+`interactive`, and `jab`, protected by the `real-jab` environment. Set the
+repository variable `PLAY_JAB_REAL_JAB=1` to enable it; configure
+`PLAY_JAB_DLL` and, when needed, `PLAY_JAB_JAVA_EXE` as environment variables.

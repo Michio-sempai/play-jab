@@ -7,8 +7,8 @@
 
 ## 1. Проверьте требования
 
-Используйте Python 3.11–3.14 и установленную Java с поддержкой Java Access
-Bridge. Проверьте доступность обоих инструментов:
+Используйте 64-битные Python 3.11–3.14 и JDK 17 с Java Access Bridge. Проверьте
+доступность обоих инструментов:
 
 ```powershell
 python --version
@@ -16,7 +16,7 @@ java -version
 $env:JAVA_HOME
 ```
 
-Архитектура Python и JAB DLL должна совпадать. Проверьте Python командой:
+Python и внешняя JAB DLL должны быть 64-битными. Проверьте Python командой:
 
 ```powershell
 python -c "import struct; print(struct.calcsize('P') * 8, 'bit')"
@@ -36,6 +36,10 @@ python -c "import struct; print(struct.calcsize('P') * 8, 'bit')"
 После этого перезапустите работающие Java-приложения. Включение JAB не добавляет
 поддержку доступности в уже запущенную JVM.
 
+`play-jab` не включает JAB DLL в wheel. `WindowsAccessBridge-64.dll` ищется по
+явному `dll_path`, затем в `JAVA_HOME`, затем в Windows `System32`. Текущий
+рабочий каталог никогда не участвует в поиске.
+
 ## 3. Установите и проверьте play-jab
 
 ```powershell
@@ -45,27 +49,40 @@ python -c "import play_jab; print(play_jab.__file__)"
 
 Вторая команда должна вывести путь установленного пакета без ошибки импорта.
 
-## Текущий публичный интерфейс
+## 4. Подключитесь и автоматизируйте
 
-API автоматизации пока не опубликован. Сейчас прикладной код может импортировать
-документированную иерархию исключений:
+Запустите Java-приложение самостоятельно, затем подключитесь ровно по одному
+HWND, PID или точному заголовку top-level окна. `PlayJab` работает только через
+attach, а его закрытие никогда не завершает целевой процесс.
 
 ```python
-from play_jab import (
-    BridgeInitializationError,
-    BridgeNotEnabledError,
-    JavaWindowNotAccessibleError,
-    JavaWindowNotFoundError,
-    PlayJabError,
-)
+from play_jab import PlayJab
 
-assert issubclass(BridgeNotEnabledError, BridgeInitializationError)
-assert issubclass(BridgeInitializationError, PlayJabError)
+with PlayJab(timeout=5_000) as jab:
+    app = jab.attach(pid=12_345)
+    window = app.window(title="Приложение")
+
+    username = window.get_by_name("login.username")
+    username.focus()
+    username.fill("alice")
+    window.get_by_name("login.remember").check()
+    window.get_by_name("login.role").select_option("Admin")
+    window.get_by_name("login.submit").click()
+
+    jobs = window.get_by_name("jobs.table").as_table()
+    print(jobs.snapshot())
+    jobs.select_row(7)
+    jobs.cell(7, 3).wait_for_text("Done", timeout=10_000)
 ```
 
+Локаторы разрешаются заново для каждой операции; обычные строки сопоставляются
+точно и с учётом регистра. Действия над формами проверяют наблюдаемый результат.
+Явный вызов `text_content()` для password разрешён, но секреты не попадают в
+snapshot, dump, логи и исключения. Индексы таблиц начинаются с нуля, ошибочный
+индекс вызывает `TableIndexError`.
+
 Не импортируйте `play_jab._native`: его имена, сигнатуры и правила жизненного
-цикла могут измениться без предупреждения. Запускаемые примеры автоматизации
-будут добавлены вместе со стабильным публичным API.
+цикла могут измениться без предупреждения.
 
 ## Диагностика
 
@@ -75,6 +92,8 @@ assert issubclass(BridgeInitializationError, PlayJabError)
 | `BridgeInitializationError` | Проверьте `JAVA_HOME`, наличие DLL и совпадение разрядности Python/JAB. |
 | `JavaWindowNotFoundError` | Убедитесь, что HWND существует и принадлежит Java-окну. |
 | `JavaWindowNotAccessibleError` | Убедитесь, что JAB был включён до запуска целевой JVM. |
+| `JavaProcessExitedError` | Attached-процесс ОС завершился; запустите его снова и создайте новую сессию. |
+| `JavaVmExitedError` | Attached JVM сообщила о shutdown; старые локаторы и ссылки нельзя использовать повторно. |
 | `JavaReferenceClosedError` | Получите элемент заново после освобождения его нативной ссылки. |
 | `BridgeClosedError` | Создайте новую сессию автоматизации: закрытый runtime нельзя использовать повторно. |
 | `NativeCallError` | Проверьте имя функции и скалярные аргументы завершившейся ошибкой операции JAB. |
@@ -92,5 +111,18 @@ uv run pytest
 ```
 
 Для реальных интеграционных тестов JAB дополнительно нужны интерактивный рабочий
-стол Windows и JDK 17. Настройка среды разработки описана в
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+стол Windows и JDK 17. Они запускаются последовательно:
+
+```powershell
+$env:PLAY_JAB_RUN_INTEGRATION = "1"
+uv run pytest tests/integration
+```
+
+stdout/stderr JVM сохраняются в
+`tests/java-fixtures/jab-swing-app/build/integration-logs/`. Настройка среды
+разработки описана в [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+GitHub job real-JAB требует self-hosted runner с labels `windows`, `x64`,
+`interactive`, `jab` и защищённое environment `real-jab`. Для включения задайте
+repository variable `PLAY_JAB_REAL_JAB=1`; в environment настройте
+`PLAY_JAB_DLL` и при необходимости `PLAY_JAB_JAVA_EXE`.

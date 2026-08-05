@@ -22,9 +22,9 @@ native-reference lifecycle management.
 ## Project status
 
 > [!IMPORTANT]
-> **Pre-alpha.** The native JAB foundation is being developed,
-> but a stable public automation API is not available yet. The current public
-> package surface contains the exception hierarchy. Expect breaking changes.
+> **Pre-alpha MVP.** The synchronous attach-only automation API is available,
+> but breaking changes are still possible. `PlayJab` never launches or stops the
+> target Java process.
 
 ## Highlights
 
@@ -32,14 +32,14 @@ native-reference lifecycle management.
 - Python 3.11–3.14 support and strict type checking
 - Explicit diagnostics for setup, window, reference, and native-call failures
 - Automated ABI, lifecycle, ownership, and real JDK 17 integration tests
-- Planned Playwright-style, locator-driven API
+- Lazy strict locators, forms, selection, polling/event-assisted waits, and tables
 
 ## Requirements
 
 - Windows
-- Python 3.11 or newer
-- A Java runtime that provides Java Access Bridge
-- Matching Python and JAB DLL architectures (both 32-bit or both 64-bit)
+- 64-bit Python 3.11–3.14
+- 64-bit JDK 17 with Java Access Bridge enabled before the target JVM starts
+- An external `WindowsAccessBridge-64.dll` (the wheel does not bundle it)
 
 ## Quick start
 
@@ -56,31 +56,45 @@ application you want to inspect:
 & "$env:JAVA_HOME\bin\jabswitch.exe" -enable
 ```
 
-Verify that the public package can be imported:
+Verify the public API:
 
 ```powershell
-python -c "from play_jab import PlayJabError; print(PlayJabError.__name__)"
+python -c "from play_jab import PlayJab; print(PlayJab.__name__)"
 ```
+
+DLL discovery is deterministic: an explicit `dll_path`, then `JAVA_HOME`, then
+Windows `System32`. The current working directory is never searched.
 
 ## Synchronous API
 
 ```python
-from play_jab.sync_api import PlayJab, contains
+from play_jab import PlayJab
 
-with PlayJab(timeout=5_000) as jab:
-    app = jab.launch(["java", "-jar", "application.jar"])
+with PlayJab(timeout=5_000, dll_path=r"C:\JAB\WindowsAccessBridge-64.dll") as jab:
+    app = jab.attach(title="Application")
     window = app.window(title="Application")
-    button = window.get_by_role("push button", name=contains("Save"))
-    button.wait_for(state="visible")
-    button.click()
+    window.get_by_name("login.username").fill("alice")
+    window.get_by_name("login.remember").check()
+    window.get_by_name("login.role").select_option("Admin")
+    window.get_by_name("login.submit").click()
+
+    table = window.get_by_name("jobs.table").as_table()
+    print(table.row_count(), table.column_count())
+    table.cell(7, 3).wait_for_text("Done")
 ```
 
 `attach(hwnd=...)`, `attach(pid=...)`, and `attach(title=...)` connect to an
 existing process. Window titles and ordinary string locators use exact,
 case-sensitive matching. Locators are lazy and acquire fresh JAB contexts for
 every operation; snapshots and accessibility trees contain copied metadata and
-do not own Java references. Closing `PlayJab` never terminates a process started
-with `launch()`.
+do not own Java references. Closing any or all `PlayJab` sessions leaves every
+attached process alive. There is intentionally no `PlayJab.launch()`.
+
+Form locators support `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
+`select_option()`, `text_content()`, and state/attribute reads. Password text may
+be read explicitly, but is redacted from dumps, snapshots, logs, and errors.
+Table indices are zero-based; `as_table()` exposes dimensions, snapshots,
+headers, row selection, cells, and cell text waits.
 
 `click()` uses the element's synchronous JAB `AccessibleAction`. When its
 handler opens a modal `JDialog`, the call can remain blocked until that dialog
@@ -107,9 +121,8 @@ checks, JAB setup, currently available imports, and troubleshooting.
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 
-User-facing automation examples will be added when the stable API lands. Until
-then, modules under `play_jab._native` are implementation details and should not
-be imported by application code.
+Modules under `play_jab._native` remain implementation details and should not be
+imported by application code.
 
 ## Development
 

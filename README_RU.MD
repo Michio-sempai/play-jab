@@ -22,9 +22,9 @@ API поверх нативного Java Access Bridge (JAB), управляет
 ## Статус проекта
 
 > [!IMPORTANT]
-> **Pre-alpha.** Низкоуровневая основа JAB находится в активной
-> разработке, стабильный публичный API автоматизации пока отсутствует. Сейчас
-> пакет публично предоставляет иерархию исключений. Возможны несовместимые изменения.
+> **Pre-alpha MVP.** Синхронный attach-only API автоматизации уже доступен,
+> но несовместимые изменения всё ещё возможны. `PlayJab` никогда не запускает и
+> не останавливает целевой Java-процесс.
 
 ## Возможности
 
@@ -32,14 +32,14 @@ API поверх нативного Java Access Bridge (JAB), управляет
 - Поддержка Python 3.11–3.14 и строгая статическая типизация
 - Понятные ошибки настройки, окон, ссылок и нативных вызовов
 - Автоматические тесты ABI, жизненного цикла, владения ссылками и интеграции с JDK 17
-- Планируемый Playwright-подобный API на основе локаторов
+- Ленивые строгие локаторы, формы, selection, ожидания и таблицы
 
 ## Требования
 
 - Windows
-- Python 3.11 или новее
-- Среда Java с поддержкой Java Access Bridge
-- Одинаковая архитектура Python и JAB DLL: 32 или 64 бита
+- 64-битный Python 3.11–3.14
+- 64-битный JDK 17 с JAB, включённым до запуска целевой JVM
+- Внешняя `WindowsAccessBridge-64.dll` (DLL не включается в wheel)
 
 ## Быстрый старт
 
@@ -56,31 +56,46 @@ python -m pip install play-jab
 & "$env:JAVA_HOME\bin\jabswitch.exe" -enable
 ```
 
-Проверьте импорт публичного пакета:
+Проверьте публичный API:
 
 ```powershell
-python -c "from play_jab import PlayJabError; print(PlayJabError.__name__)"
+python -c "from play_jab import PlayJab; print(PlayJab.__name__)"
 ```
+
+DLL ищется в строгом порядке: явный `dll_path`, затем `JAVA_HOME`, затем
+Windows `System32`. Текущий рабочий каталог в поиске не участвует.
 
 ## Синхронный API
 
 ```python
-from play_jab.sync_api import PlayJab, contains
+from play_jab import PlayJab
 
-with PlayJab(timeout=5_000) as jab:
-    app = jab.launch(["java", "-jar", "application.jar"])
+with PlayJab(timeout=5_000, dll_path=r"C:\JAB\WindowsAccessBridge-64.dll") as jab:
+    app = jab.attach(title="Приложение")
     window = app.window(title="Приложение")
-    button = window.get_by_role("push button", name=contains("Сохранить"))
-    button.wait_for(state="visible")
-    button.click()
+    window.get_by_name("login.username").fill("alice")
+    window.get_by_name("login.remember").check()
+    window.get_by_name("login.role").select_option("Admin")
+    window.get_by_name("login.submit").click()
+
+    table = window.get_by_name("jobs.table").as_table()
+    print(table.row_count(), table.column_count())
+    table.cell(7, 3).wait_for_text("Done")
 ```
 
 Методы `attach(hwnd=...)`, `attach(pid=...)` и `attach(title=...)` подключаются
 к существующему процессу. Заголовки окон и обычные строковые locator-ы
 сопоставляются точно и с учётом регистра. Locator-ы ленивы и получают свежий
 JAB context для каждой операции; snapshots и accessibility tree содержат только
-скопированные метаданные и не владеют Java-ссылками. Закрытие `PlayJab` никогда
-не завершает процесс, запущенный через `launch()`.
+скопированные метаданные и не владеют Java-ссылками. Закрытие одной или всех
+сессий `PlayJab` оставляет attached-процессы живыми. Метода `PlayJab.launch()`
+намеренно нет.
+
+Для форм доступны `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
+`select_option()`, `text_content()` и чтение состояний/атрибутов. Password можно
+прочитать явно, но секреты скрываются из dump, snapshot, логов и ошибок. Индексы
+таблиц начинаются с нуля; `as_table()` предоставляет размеры, snapshot, headers,
+выделение строк, ячейки и ожидание текста ячейки.
 
 `click()` использует синхронный JAB `AccessibleAction` элемента. Если его
 обработчик открывает модальный `JDialog`, вызов может оставаться заблокированным
@@ -108,8 +123,7 @@ fallback с JAB нет; после клика восстанавливаются
 - [Участие в разработке](CONTRIBUTING.md)
 - [История изменений](CHANGELOG.md)
 
-Пользовательские примеры автоматизации появятся вместе со стабильным API. До
-этого модули внутри `play_jab._native` считаются деталями реализации и не должны
+Модули внутри `play_jab._native` остаются деталями реализации и не должны
 импортироваться прикладным кодом.
 
 ## Разработка
