@@ -1,0 +1,315 @@
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.awt.Component;
+import java.awt.Container;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.accessibility.Accessible;
+import javax.accessibility.AccessibleContext;
+import javax.accessibility.AccessibleRole;
+import javax.accessibility.AccessibleTable;
+import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
+import javax.swing.JLabel;
+import javax.swing.JList;
+import javax.swing.JPanel;
+import javax.swing.JPasswordField;
+import javax.swing.JTabbedPane;
+import javax.swing.JTable;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+import org.junit.jupiter.api.Test;
+
+/** In-process contracts for metadata and deterministic Swing state used by real-JAB tests. */
+final class SwingFixtureContractTest {
+
+    @Test
+    void tabMetadataAndInitialSelectionAreStable() throws Exception {
+        onEdt(() -> {
+            JTabbedPane tabs = new SwingFixtureApp().buildTabs();
+
+            assertEquals("fixture.tabs", accessibleName(tabs));
+            assertEquals(4, tabs.getTabCount());
+            assertEquals(0, tabs.getSelectedIndex());
+            assertEquals("Form", tabs.getTitleAt(0));
+            assertEquals("Table", tabs.getTitleAt(1));
+            assertEquals("Dynamic", tabs.getTitleAt(2));
+            assertEquals("Locator", tabs.getTitleAt(3));
+            assertEquals(
+                    "fixture.tab_form_page",
+                    tabs.getAccessibleContext()
+                            .getAccessibleChild(0)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            assertEquals(
+                    "fixture.tab_table_page",
+                    tabs.getAccessibleContext()
+                            .getAccessibleChild(1)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            assertEquals(
+                    "fixture.tab_dynamic_page",
+                    tabs.getAccessibleContext()
+                            .getAccessibleChild(2)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            assertEquals(
+                    "fixture.tab_locator_page",
+                    tabs.getAccessibleContext()
+                            .getAccessibleChild(3)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            return null;
+        });
+    }
+
+    @Test
+    void formMetadataAndSubmitResultAreStable() throws Exception {
+        onEdt(() -> {
+            SwingFixtureApp app = new SwingFixtureApp();
+            JPanel form = app.buildFormTab();
+
+            assertEquals("fixture.tab_form", accessibleName(form));
+            JTextField username = find(form, "fixture.username_field", JTextField.class);
+            JPasswordField password =
+                    find(form, "fixture.password_field", JPasswordField.class);
+            JCheckBox remember =
+                    find(form, "fixture.remember_checkbox", JCheckBox.class);
+            JComboBox<?> role = find(form, "fixture.role_combo", JComboBox.class);
+            JList<?> environment = find(form, "fixture.environment_list", JList.class);
+            JLabel status = find(form, "fixture.status_label", JLabel.class);
+            JLabel unicode = find(form, "fixture.unicode_label", JLabel.class);
+
+            assertEquals("", username.getText());
+            assertEquals(0, password.getPassword().length);
+            assertFalse(remember.isSelected());
+            assertEquals("Viewer", role.getSelectedItem());
+            assertEquals("dev", environment.getSelectedValue());
+            assertEquals("ready", accessibleDescription(status));
+            assertEquals("Привет · 日本語 · naïve · ✓ · 🚀", accessibleDescription(unicode));
+
+            username.setText("Иван 🚀");
+            password.setText("never-log-this");
+            remember.setSelected(true);
+            role.setSelectedIndex(2);
+            environment.setSelectedIndex(2);
+            find(form, "fixture.submit_button", JButton.class).doClick();
+
+            String result = accessibleDescription(status);
+            assertEquals(
+                    "signed in: user=Иван 🚀 role=Admin env=prod remember=true password_len=14",
+                    result);
+            assertFalse(result.contains("never-log-this"));
+            username.setText("");
+            password.setText("");
+            assertEquals("", username.getText());
+            assertEquals(0, password.getPassword().length);
+            return null;
+        });
+    }
+
+    @Test
+    void realisticTableDimensionsMutationAndSelectionAreStable() throws Exception {
+        onEdt(() -> {
+            SwingFixtureApp app = new SwingFixtureApp();
+            JPanel tab = app.buildTableTab();
+            JTable table = find(tab, "fixture.table", JTable.class);
+            AccessibleTable accessibleTable = table.getAccessibleContext().getAccessibleTable();
+
+            assertEquals(100, accessibleTable.getAccessibleRowCount());
+            assertEquals(5, accessibleTable.getAccessibleColumnCount());
+            AccessibleTable columnHeader = accessibleTable.getAccessibleColumnHeader();
+            assertEquals(1, columnHeader.getAccessibleRowCount());
+            assertEquals(5, columnHeader.getAccessibleColumnCount());
+            assertEquals(
+                    "ID",
+                    columnHeader.getAccessibleAt(0, 0)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            assertEquals(
+                    "Progress",
+                    columnHeader.getAccessibleAt(0, 4)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            assertEquals(
+                    "job-7",
+                    accessibleTable.getAccessibleAt(7, 1)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            assertEquals("Processing", table.getValueAt(7, 3));
+
+            find(tab, "fixture.mark_done_button", JButton.class).doClick();
+            assertEquals("Done", table.getValueAt(7, 3));
+            find(tab, "fixture.reset_table_button", JButton.class).doClick();
+            assertEquals("Processing", table.getValueAt(7, 3));
+
+            find(tab, "fixture.select_row_button", JButton.class).doClick();
+            assertArrayEquals(new int[] {7}, table.getSelectedRows());
+            assertArrayEquals(new int[] {0, 1, 2, 3, 4}, table.getSelectedColumns());
+
+            find(tab, "fixture.select_few_button", JButton.class).doClick();
+            assertArrayEquals(new int[] {1, 3, 5}, table.getSelectedRows());
+            assertArrayEquals(new int[0], table.getSelectedColumns());
+
+            find(tab, "fixture.select_column_button", JButton.class).doClick();
+            assertEquals(100, table.getSelectedRowCount());
+            assertArrayEquals(new int[] {3}, table.getSelectedColumns());
+            find(tab, "fixture.clear_selection_button", JButton.class).doClick();
+            assertArrayEquals(new int[0], table.getSelectedRows());
+            return null;
+        });
+    }
+
+    @Test
+    void syntheticTableCellHasNoBoundsOrActionSurface() throws Exception {
+        onEdt(() -> {
+            SyntheticAccessibleTable component = new SyntheticAccessibleTable();
+            AccessibleContext context = component.getAccessibleContext();
+            AccessibleTable table = context.getAccessibleTable();
+
+            assertEquals("fixture.synthetic_table", context.getAccessibleName());
+            assertEquals(AccessibleRole.TABLE, context.getAccessibleRole());
+            assertEquals(1, table.getAccessibleRowCount());
+            assertEquals(1, table.getAccessibleColumnCount());
+            Accessible cell = table.getAccessibleAt(0, 0);
+            assertEquals(
+                    "fixture.synthetic_cell_0_0",
+                    cell.getAccessibleContext().getAccessibleName());
+            assertNull(cell.getAccessibleContext().getAccessibleComponent());
+            assertNull(cell.getAccessibleContext().getAccessibleAction());
+            assertFalse(table.isAccessibleSelected(0, 0));
+            assertNull(table.getAccessibleAt(1, 0));
+            return null;
+        });
+    }
+
+    @Test
+    void dynamicControlsAndTimerHaveDeterministicCleanup() throws Exception {
+        onEdt(() -> {
+            SwingFixtureApp app = new SwingFixtureApp();
+            JPanel tab = app.buildDynamicTab();
+            JLabel count = find(tab, "fixture.dynamic_count_label", JLabel.class);
+
+            assertEquals("items: 0", accessibleDescription(count));
+            find(tab, "fixture.add_item_button", JButton.class).doClick();
+            assertEquals("items: 1", accessibleDescription(count));
+            assertEquals(
+                    "Item 1",
+                    accessibleDescription(find(tab, "fixture.dynamic_item_1", JLabel.class)));
+            find(tab, "fixture.remove_item_button", JButton.class).doClick();
+            assertEquals("items: 0", accessibleDescription(count));
+
+            app.buildLocatorTab();
+            app.startAutoNodeCycle();
+            assertTrue(app.isAutoNodeCycleRunning());
+            app.stopAutoNodeCycle();
+            assertFalse(app.isAutoNodeCycleRunning());
+            return null;
+        });
+    }
+
+    @Test
+    void accessibleStatusAndTableModelPublishMutationEvents() throws Exception {
+        onEdt(() -> {
+            JLabel status = JabDialogRepro.createStatusLabel();
+            AtomicInteger descriptions = new AtomicInteger();
+            status.getAccessibleContext().addPropertyChangeListener(event -> {
+                if (AccessibleContext.ACCESSIBLE_DESCRIPTION_PROPERTY.equals(
+                        event.getPropertyName())) {
+                    descriptions.incrementAndGet();
+                }
+            });
+            JabDialogRepro.setStatus(status, "opened: Scenario A");
+            assertEquals("repro.status", accessibleName(status));
+            assertEquals("opened: Scenario A", accessibleDescription(status));
+            assertTrue(descriptions.get() >= 1);
+
+            SwingFixtureApp app = new SwingFixtureApp();
+            JPanel tableTab = app.buildTableTab();
+            JTable table = find(tableTab, "fixture.table", JTable.class);
+            AtomicInteger modelEvents = new AtomicInteger();
+            table.getModel().addTableModelListener(event -> modelEvents.incrementAndGet());
+            find(tableTab, "fixture.mark_done_button", JButton.class).doClick();
+            assertEquals(1, modelEvents.get());
+            return null;
+        });
+    }
+
+    @Test
+    void invalidLauncherModeIsDiagnosticWithoutExitingTestJvm() {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        int exitCode;
+        try (PrintStream error = new PrintStream(buffer, true, StandardCharsets.UTF_8)) {
+            exitCode = FixtureLauncher.run(new String[] {"invalid"}, error);
+        }
+        assertEquals(2, exitCode);
+        assertTrue(buffer.toString(StandardCharsets.UTF_8).contains("Unknown fixture mode: invalid"));
+    }
+
+    private static String accessibleName(Component component) {
+        if (component instanceof Accessible accessible) {
+            return accessible.getAccessibleContext().getAccessibleName();
+        }
+        return null;
+    }
+
+    private static String accessibleDescription(Component component) {
+        if (component instanceof Accessible accessible) {
+            return accessible.getAccessibleContext().getAccessibleDescription();
+        }
+        return null;
+    }
+
+    private static <T extends Component> T find(
+            Container root, String name, Class<T> expectedType) {
+        if (name.equals(accessibleName(root))) {
+            return assertInstanceOf(expectedType, root);
+        }
+        for (Component child : root.getComponents()) {
+            if (name.equals(accessibleName(child))) {
+                return assertInstanceOf(expectedType, child);
+            }
+            if (child instanceof Container container) {
+                try {
+                    return find(container, name, expectedType);
+                } catch (AssertionError ignored) {
+                    // Continue searching sibling subtrees.
+                }
+            }
+        }
+        throw new AssertionError("No component with accessible name " + name);
+    }
+
+    private static <T> T onEdt(Callable<T> action) throws Exception {
+        if (SwingUtilities.isEventDispatchThread()) {
+            return action.call();
+        }
+        AtomicReference<T> result = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> {
+            try {
+                result.set(action.call());
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+        Throwable error = failure.get();
+        if (error instanceof Exception exception) {
+            throw exception;
+        }
+        if (error instanceof Error fatal) {
+            throw fatal;
+        }
+        return result.get();
+    }
+}

@@ -1,3 +1,5 @@
+import java.io.PrintStream;
+
 /**
  * Единая точка входа fixture-приложения {@code play-jab}.
  *
@@ -33,18 +35,27 @@ public final class FixtureLauncher {
 
     public static void main(String[] args) {
         warnIfBridgeInactive();
+        int exitCode = run(args, System.err);
+        if (exitCode != 0) {
+            System.exit(exitCode);
+        }
+    }
+
+    /** Package-private seam: contract tests can validate dispatch without exiting Gradle's JVM. */
+    static int run(String[] args, PrintStream error) {
         String mode = args.length > 0 ? args[0] : "swing";
         switch (mode) {
             case "swing" -> SwingFixtureApp.main(
                     java.util.Arrays.copyOfRange(args, 1, args.length));
             case "dialog" -> JabDialogRepro.main(new String[0]);
             default -> {
-                System.err.println(
+                error.println(
                         "Unknown fixture mode: " + mode
                                 + " (expected 'swing' or 'dialog')");
-                System.exit(2);
+                return 2;
             }
         }
+        return 0;
     }
 
     /**

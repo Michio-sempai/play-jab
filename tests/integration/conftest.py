@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import itertools
 import os
 import shutil
 import subprocess
@@ -40,6 +41,8 @@ class SwingFixture:
 
     hwnd: int
     process: subprocess.Popen[str]
+    stdout_log: Path
+    stderr_log: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,20 @@ class DialogFixture:
 
     hwnd: int
     process: subprocess.Popen[str]
+    stdout_log: Path
+    stderr_log: Path
+
+
+@dataclass(frozen=True, slots=True)
+class JavaFixtureBuild:
+    """Session-built Java classes and persistent diagnostic-log directory."""
+
+    root: Path
+    classes: Path
+    log_directory: Path
+
+
+_JVM_SEQUENCE = itertools.count(1)
 
 
 def _integration_requested() -> bool:
@@ -75,6 +92,43 @@ def _compile_fixture(root: Path) -> None:
             "Could not compile the Java integration fixture.\n"
             f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
         )
+
+
+def _log_tail(path: Path, *, limit: int = 8_000) -> str:
+    """Return a bounded diagnostic tail without keeping a JVM pipe open."""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"<could not read {path}: {exc}>"
+    return content[-limit:]
+
+
+@contextlib.contextmanager
+def _running_jvm(
+    build: JavaFixtureBuild,
+    name: str,
+    arguments: list[str],
+) -> Iterator[tuple[subprocess.Popen[str], Path, Path]]:
+    """Run one JVM with file-backed output so a verbose process cannot deadlock."""
+    sequence = next(_JVM_SEQUENCE)
+    stdout_path = build.log_directory / f"{sequence:02d}-{name}.stdout.log"
+    stderr_path = build.log_directory / f"{sequence:02d}-{name}.stderr.log"
+    with (
+        stdout_path.open("w", encoding="utf-8", newline="") as stdout_file,
+        stderr_path.open("w", encoding="utf-8", newline="") as stderr_file,
+    ):
+        process = subprocess.Popen(
+            arguments,
+            cwd=build.root,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+        )
+        try:
+            yield process, stdout_path, stderr_path
+        finally:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                _stop_process(process)
 
 
 def _java_executable() -> str:
@@ -132,15 +186,25 @@ def raw_windows(process_id: int, *, title: str | None = None) -> list[int]:
     return matches
 
 
-def _wait_for_window(process: subprocess.Popen[str]) -> int:
+def _process_diagnostics(stdout_log: Path, stderr_log: Path) -> str:
+    return (
+        f"stdout log: {stdout_log}\n{_log_tail(stdout_log)}\n"
+        f"stderr log: {stderr_log}\n{_log_tail(stderr_log)}"
+    )
+
+
+def _wait_for_window(
+    process: subprocess.Popen[str],
+    stdout_log: Path,
+    stderr_log: Path,
+) -> int:
     deadline = time.monotonic() + _WINDOW_TIMEOUT
     while time.monotonic() < deadline:
         return_code = process.poll()
         if return_code is not None:
-            stdout, stderr = process.communicate(timeout=_PROCESS_TIMEOUT)
             pytest.fail(
                 f"Swing fixture exited with code {return_code}.\n"
-                f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                f"{_process_diagnostics(stdout_log, stderr_log)}"
             )
         hwnd = _window_for_process(process.pid)
         if hwnd is not None:
@@ -149,15 +213,22 @@ def _wait_for_window(process: subprocess.Popen[str]) -> int:
     pytest.fail(f"Swing fixture did not create {_WINDOW_TITLE!r} within the timeout")
 
 
-def wait_for_raw_window(process: subprocess.Popen[str], title: str) -> int:
+def wait_for_raw_window(
+    process: subprocess.Popen[str],
+    title: str,
+    stdout_log: Path | None = None,
+    stderr_log: Path | None = None,
+) -> int:
     """Wait for one exact raw HWND, without consulting Java Access Bridge."""
     deadline = time.monotonic() + _WINDOW_TIMEOUT
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stdout, stderr = process.communicate(timeout=_PROCESS_TIMEOUT)
+            diagnostics = ""
+            if stdout_log is not None and stderr_log is not None:
+                diagnostics = "\n" + _process_diagnostics(stdout_log, stderr_log)
             pytest.fail(
                 f"Dialog fixture exited with code {process.returncode}; "
-                f"expected {title!r}.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                f"expected {title!r}.{diagnostics}"
             )
         matches = raw_windows(process.pid, title=title)
         if len(matches) == 1:
@@ -234,158 +305,142 @@ def backend_factory(jab_dll_path: Path) -> Callable[[], NativeBackend]:
 
 
 @pytest.fixture(scope="session")
-def swing_fixture() -> Iterator[SwingFixture]:
-    """Compile and start the existing fixture with JAB explicitly activated."""
+def java_fixture_build() -> JavaFixtureBuild:
+    """Compile the Java fixture exactly once for the complete pytest session."""
     root = _fixture_root()
     _compile_fixture(root)
     classes = root / "build" / "classes" / "java" / "main"
+    log_directory = (
+        root / "build" / "integration-logs" / f"{os.getpid()}-{time.time_ns()}"
+    )
+    log_directory.mkdir(parents=True, exist_ok=False)
+    return JavaFixtureBuild(root, classes, log_directory)
+
+
+def _fixture_command(
+    build: JavaFixtureBuild,
+    *arguments: str,
+    jab_enabled: bool = True,
+) -> list[str]:
     command = [
         _java_executable(),
-        "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
-        "-cp",
-        str(classes),
-        "FixtureLauncher",
-        "swing",
     ]
-    process = subprocess.Popen(
-        command,
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        yield SwingFixture(_wait_for_window(process), process)
-    finally:
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            _stop_process(process)
+    if jab_enabled:
+        command.append(
+            "-Djavax.accessibility.assistive_technologies="
+            "com.sun.java.accessibility.AccessBridge"
+        )
+    return [
+        *command,
+        "-cp",
+        str(build.classes),
+        "FixtureLauncher",
+        *arguments,
+    ]
+
+
+@pytest.fixture(scope="session")
+def swing_fixture(java_fixture_build: JavaFixtureBuild) -> Iterator[SwingFixture]:
+    """Start the session Swing fixture with JAB explicitly activated."""
+    with _running_jvm(
+        java_fixture_build,
+        "swing",
+        _fixture_command(java_fixture_build, "swing"),
+    ) as launched:
+        process, stdout_log, stderr_log = launched
+        hwnd = _wait_for_window(process, stdout_log, stderr_log)
+        yield SwingFixture(hwnd, process, stdout_log, stderr_log)
 
 
 @pytest.fixture
-def dialog_fixture() -> Iterator[DialogFixture]:
+def dialog_fixture(
+    java_fixture_build: JavaFixtureBuild,
+) -> Iterator[DialogFixture]:
     """Start a fresh JVM for one modal-dialog scenario."""
-    root = _fixture_root()
-    _compile_fixture(root)
-    classes = root / "build" / "classes" / "java" / "main"
-    process = subprocess.Popen(
-        [
-            _java_executable(),
-            "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
-            "-cp",
-            str(classes),
-            "FixtureLauncher",
-            "dialog",
-        ],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        yield DialogFixture(wait_for_raw_window(process, "JAB dialog repro"), process)
-    finally:
-        with contextlib.suppress(OSError):
-            for hwnd in raw_windows(process.pid):
-                close_raw_window(hwnd)
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            _stop_process(process)
+    with _running_jvm(
+        java_fixture_build,
+        "dialog",
+        _fixture_command(java_fixture_build, "dialog"),
+    ) as launched:
+        process, stdout_log, stderr_log = launched
+        try:
+            hwnd = wait_for_raw_window(
+                process,
+                "JAB dialog repro",
+                stdout_log,
+                stderr_log,
+            )
+            yield DialogFixture(hwnd, process, stdout_log, stderr_log)
+        finally:
+            with contextlib.suppress(OSError):
+                for hwnd in raw_windows(process.pid):
+                    close_raw_window(hwnd)
 
 
 @pytest.fixture
-def dialog_first_fixture() -> Iterator[DialogFixture]:
+def dialog_first_fixture(
+    java_fixture_build: JavaFixtureBuild,
+) -> Iterator[DialogFixture]:
     """Start the standalone dialog-first diagnostic in a fresh JVM."""
-    root = _fixture_root()
-    _compile_fixture(root)
-    classes = root / "build" / "classes" / "java" / "main"
-    process = subprocess.Popen(
-        [
-            _java_executable(),
-            "-Ddialog.first=true",
-            "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
-            "-cp",
-            str(classes),
-            "FixtureLauncher",
-            "dialog",
-        ],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        yield DialogFixture(wait_for_raw_window(process, "Scenario First"), process)
-    finally:
-        with contextlib.suppress(OSError):
-            for hwnd in raw_windows(process.pid):
-                close_raw_window(hwnd)
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            _stop_process(process)
+    command = _fixture_command(java_fixture_build, "dialog")
+    command.insert(1, "-Ddialog.first=true")
+    with _running_jvm(
+        java_fixture_build,
+        "dialog-first",
+        command,
+    ) as launched:
+        process, stdout_log, stderr_log = launched
+        try:
+            hwnd = wait_for_raw_window(
+                process,
+                "Scenario First",
+                stdout_log,
+                stderr_log,
+            )
+            yield DialogFixture(hwnd, process, stdout_log, stderr_log)
+        finally:
+            with contextlib.suppress(OSError):
+                for hwnd in raw_windows(process.pid):
+                    close_raw_window(hwnd)
 
 
 @pytest.fixture(scope="session")
 def swing_fixture_with_second_window(
     jab_dll_path: Path,
+    java_fixture_build: JavaFixtureBuild,
 ) -> Iterator[SwingFixture]:
     """Start the locator fixture with two Java top-level windows."""
-    root = _fixture_root()
-    _compile_fixture(root)
-    classes = root / "build" / "classes" / "java" / "main"
-    command = [
-        _java_executable(),
-        "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
-        "-cp",
-        str(classes),
-        "FixtureLauncher",
-        "swing",
-        "--second-window",
-    ]
-    process = subprocess.Popen(
-        command,
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        hwnd = _wait_for_window(process)
+    with _running_jvm(
+        java_fixture_build,
+        "swing-second-window",
+        _fixture_command(java_fixture_build, "swing", "--second-window"),
+    ) as launched:
+        process, stdout_log, stderr_log = launched
+        hwnd = _wait_for_window(process, stdout_log, stderr_log)
         _wait_for_accessible_windows(
             process,
             jab_dll_path,
             _WINDOW_TITLE,
             _SECONDARY_WINDOW_TITLE,
         )
-        yield SwingFixture(hwnd, process)
-    finally:
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            _stop_process(process)
+        yield SwingFixture(hwnd, process, stdout_log, stderr_log)
 
 
 @pytest.fixture(scope="session")
-def disabled_swing_fixture() -> Iterator[SwingFixture]:
+def disabled_swing_fixture(
+    java_fixture_build: JavaFixtureBuild,
+) -> Iterator[SwingFixture]:
     """Start the fixture without a JAB JVM flag for isolated-profile testing."""
     if os.environ.get("PLAY_JAB_ISOLATED_DISABLED_PROFILE") != "1":
         pytest.skip("requires an isolated Windows profile with JAB disabled")
-    root = _fixture_root()
-    _compile_fixture(root)
-    classes = root / "build" / "classes" / "java" / "main"
-    process = subprocess.Popen(
-        [
-            _java_executable(),
-            "-cp",
-            str(classes),
-            "FixtureLauncher",
-            "swing",
-        ],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        yield SwingFixture(_wait_for_window(process), process)
-    finally:
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            _stop_process(process)
+    with _running_jvm(
+        java_fixture_build,
+        "swing-jab-disabled",
+        _fixture_command(java_fixture_build, "swing", jab_enabled=False),
+    ) as launched:
+        process, stdout_log, stderr_log = launched
+        hwnd = _wait_for_window(process, stdout_log, stderr_log)
+        yield SwingFixture(hwnd, process, stdout_log, stderr_log)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

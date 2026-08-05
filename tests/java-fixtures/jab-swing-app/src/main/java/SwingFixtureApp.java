@@ -5,6 +5,8 @@ import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.util.Arrays;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
@@ -68,6 +70,7 @@ import javax.swing.table.DefaultTableModel;
  * fixture.unicode_label             JLabel            не-ASCII текст для проверки UTF-16
  *
  * fixture.table                     JTable            100 строк x 5 колонок, см. ниже
+ * fixture.synthetic_table           AccessibleTable   diagnostic non-actionable cell
  * fixture.table_scrollbar_vertical  JScrollBar        AccessibleValue для ручной прокрутки
  * fixture.mark_done_button          JButton           cell(7, 3): "Processing" -> "Done"
  * fixture.reset_table_button        JButton           возвращает cell(7, 3) в "Processing"
@@ -259,6 +262,7 @@ public final class SwingFixtureApp {
     private final JLabel dynamicCountLabel = new JLabel();
     private final JPanel autoPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
     private final JLabel autoNode = new JLabel("Automatic node");
+    private Timer autoNodeTimer;
 
     private JTextField usernameField;
     private JPasswordField passwordField;
@@ -279,7 +283,30 @@ public final class SwingFixtureApp {
         JFrame frame = new JFrame("JAB swing fixture");
         frame.getAccessibleContext().setAccessibleName("fixture.main");
         frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
+        frame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent event) {
+                stopAutoNodeCycle();
+            }
 
+            @Override
+            public void windowClosed(WindowEvent event) {
+                stopAutoNodeCycle();
+            }
+        });
+
+        JTabbedPane tabs = buildTabs();
+        frame.add(tabs, BorderLayout.CENTER);
+        frame.pack();
+        frame.setLocationRelativeTo(null);
+        frame.setVisible(true);
+        startAutoNodeCycle();
+        if (secondWindow) {
+            showSecondaryWindow(frame);
+        }
+    }
+
+    JTabbedPane buildTabs() {
         JTabbedPane tabs = new JTabbedPane();
         tabs.getAccessibleContext().setAccessibleName("fixture.tabs");
         tabs.addTab("Form", buildFormTab());
@@ -290,15 +317,7 @@ public final class SwingFixtureApp {
         nameTabPage(tabs, 1, "fixture.tab_table_page");
         nameTabPage(tabs, 2, "fixture.tab_dynamic_page");
         nameTabPage(tabs, 3, "fixture.tab_locator_page");
-
-        frame.add(tabs, BorderLayout.CENTER);
-        frame.pack();
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
-        startAutoNodeCycle();
-        if (secondWindow) {
-            showSecondaryWindow(frame);
-        }
+        return tabs;
     }
 
     /**
@@ -313,7 +332,7 @@ public final class SwingFixtureApp {
                 .setAccessibleName(name);
     }
 
-    private JPanel buildFormTab() {
+    JPanel buildFormTab() {
         usernameField = new JTextField(24);
         usernameField.getAccessibleContext().setAccessibleName("fixture.username_field");
 
@@ -442,7 +461,7 @@ public final class SwingFixtureApp {
         };
     }
 
-    private JPanel buildTableTab() {
+    JPanel buildTableTab() {
         table.getAccessibleContext().setAccessibleName("fixture.table");
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
@@ -516,6 +535,7 @@ public final class SwingFixtureApp {
         panel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         panel.add(scrollPane, BorderLayout.NORTH);
         panel.add(buttons, BorderLayout.CENTER);
+        panel.add(new SyntheticAccessibleTable(), BorderLayout.SOUTH);
         return panel;
     }
 
@@ -534,7 +554,7 @@ public final class SwingFixtureApp {
         table.setColumnSelectionAllowed(true);
     }
 
-    private JPanel buildDynamicTab() {
+    JPanel buildDynamicTab() {
         dynamicPanel.setLayout(new BoxLayout(dynamicPanel, BoxLayout.Y_AXIS));
         dynamicPanel.getAccessibleContext().setAccessibleName("fixture.dynamic_panel");
         dynamicPanel.setBorder(BorderFactory.createTitledBorder("Dynamic items"));
@@ -569,7 +589,7 @@ public final class SwingFixtureApp {
      * фильтрации по states. Одинаковые accessible names у duplicate-кнопок
      * намеренны: уникальность появляется только после разрешения контейнера.
      */
-    private JPanel buildLocatorTab() {
+    JPanel buildLocatorTab() {
         JPanel alpha = buildDuplicateScope("fixture.scope_alpha", "duplicate in alpha");
         JPanel beta = buildDuplicateScope("fixture.scope_beta", "duplicate in beta");
 
@@ -631,8 +651,9 @@ public final class SwingFixtureApp {
      * Переключает физическое присутствие auto-node, а не только его visibility.
      * Повторяющийся цикл исключает гонку между запуском JVM и attach теста.
      */
-    private void startAutoNodeCycle() {
-        Timer timer = new Timer(1500, event -> {
+    void startAutoNodeCycle() {
+        stopAutoNodeCycle();
+        autoNodeTimer = new Timer(1500, event -> {
             if (autoNodeAttached) {
                 autoPanel.remove(autoNode);
             } else {
@@ -642,8 +663,19 @@ public final class SwingFixtureApp {
             autoPanel.revalidate();
             autoPanel.repaint();
         });
-        timer.setInitialDelay(1500);
-        timer.start();
+        autoNodeTimer.setInitialDelay(1500);
+        autoNodeTimer.start();
+    }
+
+    void stopAutoNodeCycle() {
+        if (autoNodeTimer != null) {
+            autoNodeTimer.stop();
+            autoNodeTimer = null;
+        }
+    }
+
+    boolean isAutoNodeCycleRunning() {
+        return autoNodeTimer != null && autoNodeTimer.isRunning();
     }
 
     /** Создаёт второе Java-окно того же PID для проверки strict window discovery. */

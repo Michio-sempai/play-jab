@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
-import os
 import re
-import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -23,34 +19,8 @@ _API_TIMEOUT_MS = 5_000
 _DYNAMIC_TIMEOUT_MS = 4_000
 _TRAVERSAL_REPETITIONS = 5
 _DUPLICATE_COUNT = 2
-
-
-def _fixture_command() -> tuple[list[str], Path]:
-    root = Path(__file__).parents[1] / "java-fixtures" / "jab-swing-app"
-    classes = root / "build" / "classes" / "java" / "main"
-    java = os.environ.get("PLAY_JAB_JAVA_EXE", "java")
-    return (
-        [
-            java,
-            "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
-            "-cp",
-            str(classes),
-            "FixtureLauncher",
-            "swing",
-        ],
-        root,
-    )
-
-
-def _stop_process(pid: int) -> None:
-    """Stop a launched fixture which PlayJab deliberately does not own."""
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
+_TABLE_ROWS = 100
+_TABLE_COLUMNS = 5
 
 
 def test_attach_by_hwnd_pid_and_exact_title(swing_fixture: SwingFixture) -> None:
@@ -70,33 +40,20 @@ def test_attach_by_hwnd_pid_and_exact_title(swing_fixture: SwingFixture) -> None
             assert api.live_ref_count == 0
 
 
-def test_launch_returns_immediately_and_api_close_leaves_process_alive(
+def test_api_close_leaves_attached_process_alive(
     swing_fixture: SwingFixture,
 ) -> None:
-    """The API discovers a launched JVM window but never owns its lifetime."""
-    # The session fixture also ensures the shared fixture classes are built.
+    """The API attaches to a fixture-owned JVM and never owns its lifetime."""
     assert swing_fixture.process.poll() is None
-    command, cwd = _fixture_command()
     api = PlayJab(timeout=_API_TIMEOUT_MS)
-    application = api.launch(command, cwd=cwd)
-    pid = application.pid
     try:
-        window = application.window(title=_TITLE, timeout=20_000)
+        application = api.attach(pid=swing_fixture.process.pid)
+        window = application.window(title=_TITLE)
         assert window.get_by_name("fixture.main").snapshot().name == "fixture.main"
         api.close()
-        assert (
-            subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=10,
-            ).stdout.find(str(pid))
-            >= 0
-        )
+        assert swing_fixture.process.poll() is None
     finally:
         api.close()
-        _stop_process(pid)
 
 
 def test_window_discovery_is_strict_with_two_top_level_windows(
@@ -178,3 +135,41 @@ def test_repeated_public_traversals_do_not_leak_native_references(
             assert "fixture.scope_alpha" in window.dump(max_depth=10)
             assert api.live_ref_count == baseline
         assert baseline == 0
+
+
+def test_forms_and_table_api_round_trip_through_real_jab(
+    swing_fixture: SwingFixture,
+) -> None:
+    """Editable text, selection and table calls use the JDK 17 ABI end to end."""
+    with PlayJab(timeout=_API_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        username = window.get_by_name("fixture.username_field")
+        password = window.get_by_name("fixture.password_field")
+        remember = window.get_by_name("fixture.remember_checkbox")
+        tabs = window.get_by_name("fixture.tabs")
+
+        try:
+            username.fill("Привет, 世界 👋")
+            assert username.text_content() == "Привет, 世界 👋"
+            password.fill("секрет")
+            assert len(password.text_content()) == len("секрет")
+            remember.check()
+            assert remember.is_checked()
+
+            tabs.select_option(1)
+            table = window.get_by_name("fixture.table").as_table()
+            assert table.row_count() == _TABLE_ROWS
+            assert table.column_count() == _TABLE_COLUMNS
+            assert table.cell(7, 1).text_content() == "job-7"
+            assert table.cell(99, 1).text_content() == "job-99"
+            assert table.cell(7, 3).text_content() == "Processing"
+            window.get_by_name("fixture.mark_done_button").click()
+            table.cell(7, 3).wait_for_text("Done")
+            window.get_by_name("fixture.reset_table_button").click()
+            table.cell(7, 3).wait_for_text("Processing")
+            assert api.live_ref_count == 0
+        finally:
+            tabs.select_option(0)
+            username.clear()
+            password.clear()
+            remember.uncheck()

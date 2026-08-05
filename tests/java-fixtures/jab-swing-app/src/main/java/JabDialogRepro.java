@@ -11,6 +11,7 @@ import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
@@ -33,6 +34,7 @@ import javax.swing.WindowConstants;
  *   repro.open_modeless                   — кнопка «открыть Сценарий A»
  *   repro.open_modal                      — кнопка «открыть Сценарий B»
  *   repro.open_invokeandwait              — кнопка «открыть Сценарий C»
+ *   repro.status                         — opening/opened/closed/error channel
  *   repro.modeless.dialog / .input / .ok  — диалог Сценария A и его поля
  *   repro.modal.dialog / .input / .ok     — диалог Сценария B и его поля
  *   repro.invokeandwait.dialog / .input / .ok — диалог Сценария C и его поля
@@ -72,15 +74,19 @@ public final class JabDialogRepro {
 
         JButton openModeless = new JButton("Open Scenario A (modeless+SecondaryLoop)");
         openModeless.getAccessibleContext().setAccessibleName("repro.open_modeless");
-        openModeless.addActionListener(e -> showModelessDialog(frame));
 
         JButton openModal = new JButton("Open Scenario B (application-modal)");
         openModal.getAccessibleContext().setAccessibleName("repro.open_modal");
-        openModal.addActionListener(e -> showModalDialog(frame, "Scenario B", "modal"));
 
         JButton openInvokeAndWait = new JButton("Open Scenario C (invokeAndWait off-EDT)");
         openInvokeAndWait.getAccessibleContext().setAccessibleName("repro.open_invokeandwait");
-        openInvokeAndWait.addActionListener(e -> showModalDialogViaInvokeAndWait(frame));
+
+        JLabel status = createStatusLabel();
+        openModeless.addActionListener(e -> showModelessDialog(frame, status));
+        openModal.addActionListener(
+                e -> showModalDialog(frame, "Scenario B", "modal", false, status));
+        openInvokeAndWait.addActionListener(
+                e -> showModalDialogViaInvokeAndWait(frame, status));
 
         JPanel content = new JPanel(new FlowLayout());
         content.add(openModeless);
@@ -88,6 +94,7 @@ public final class JabDialogRepro {
         content.add(openInvokeAndWait);
 
         frame.add(content, BorderLayout.CENTER);
+        frame.add(status, BorderLayout.SOUTH);
         frame.setSize(560, 160);
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
@@ -100,7 +107,8 @@ public final class JabDialogRepro {
      * продолжает обрабатывать события. Существенно то, что вызванный через JAB
      * listener не завершается до закрытия диалога.
      */
-    private static void showModelessDialog(JFrame parent) {
+    private static void showModelessDialog(JFrame parent, JLabel status) {
+        setStatus(status, "opening: Scenario A");
         Window owner = SwingUtilities.getWindowAncestor(parent);
         JDialog dialog = new JDialog(owner, "Scenario A", Dialog.ModalityType.MODELESS);
         dialog.getAccessibleContext().setAccessibleName("repro.modeless.dialog");
@@ -111,7 +119,13 @@ public final class JabDialogRepro {
         dialog.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosed(WindowEvent e) {
+                setStatus(status, "closed: Scenario A");
                 loop.exit();
+            }
+
+            @Override
+            public void windowOpened(WindowEvent e) {
+                setStatus(status, "opened: Scenario A");
             }
         });
         dialog.setVisible(true); // вызвано уже внутри ActionListener (на EDT) — вложенный показ
@@ -127,15 +141,31 @@ public final class JabDialogRepro {
      * @param namePrefix   префикс accessible-имён (repro.<namePrefix>.*)
      */
     private static void showModalDialog(Window owner, String title, String namePrefix) {
-        showModalDialog(owner, title, namePrefix, false);
+        showModalDialog(owner, title, namePrefix, false, null);
     }
 
     private static void showModalDialog(
-            Window owner, String title, String namePrefix, boolean includeNestedButton) {
+            Window owner,
+            String title,
+            String namePrefix,
+            boolean includeNestedButton,
+            JLabel status) {
+        setStatus(status, "opening: " + title);
         JDialog dialog = new JDialog(owner, title, Dialog.ModalityType.APPLICATION_MODAL);
         dialog.getAccessibleContext().setAccessibleName("repro." + namePrefix + ".dialog");
         dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-        buildDialogContent(dialog, "repro." + namePrefix, includeNestedButton);
+        dialog.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowOpened(WindowEvent event) {
+                setStatus(status, "opened: " + title);
+            }
+
+            @Override
+            public void windowClosed(WindowEvent event) {
+                setStatus(status, "closed: " + title);
+            }
+        });
+        buildDialogContent(dialog, "repro." + namePrefix, includeNestedButton, status);
         dialog.setVisible(true); // штатная модальная блокировка AWT
         if (owner == null) {
             System.exit(0); // единственное окно процесса — после закрытия выходим
@@ -152,14 +182,18 @@ public final class JabDialogRepro {
      * APPLICATION_MODAL синхронно из собственного listener и воспроизводит
      * проблему уже для вложенного диалога.
      */
-    private static void showModalDialogViaInvokeAndWait(JFrame parent) {
+    private static void showModalDialogViaInvokeAndWait(JFrame parent, JLabel status) {
         Thread invoker = new Thread(() -> {
             try {
                 SwingUtilities.invokeAndWait(
                         () -> showModalDialog(
-                                parent, "Scenario C", "invokeandwait", true));
+                                parent, "Scenario C", "invokeandwait", true, status));
             } catch (InterruptedException | InvocationTargetException e) {
-                throw new RuntimeException(e);
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                SwingUtilities.invokeLater(
+                        () -> setStatus(status, "error: " + e.getClass().getSimpleName()));
             }
         }, "scenario-c-invoker");
         invoker.setDaemon(true);
@@ -167,11 +201,14 @@ public final class JabDialogRepro {
     }
 
     private static void buildDialogContent(JDialog dialog, String namePrefix) {
-        buildDialogContent(dialog, namePrefix, false);
+        buildDialogContent(dialog, namePrefix, false, null);
     }
 
     private static void buildDialogContent(
-            JDialog dialog, String namePrefix, boolean includeNestedButton) {
+            JDialog dialog,
+            String namePrefix,
+            boolean includeNestedButton,
+            JLabel status) {
         JTextField input = new JTextField(30);
         input.getAccessibleContext().setAccessibleName(namePrefix + ".input");
 
@@ -186,7 +223,8 @@ public final class JabDialogRepro {
                     .getAccessibleContext()
                     .setAccessibleName("repro.invokeandwait.open_nested");
             openNested.addActionListener(
-                    e -> showModalDialog(dialog, "Scenario Nested", "nested"));
+                    e -> showModalDialog(
+                            dialog, "Scenario Nested", "nested", false, status));
             buttons.add(openNested);
         }
         buttons.add(ok);
@@ -199,5 +237,20 @@ public final class JabDialogRepro {
         dialog.setContentPane(content);
         dialog.pack();
         dialog.setLocationRelativeTo(dialog.getOwner());
+    }
+
+    static JLabel createStatusLabel() {
+        JLabel status = new JLabel();
+        status.getAccessibleContext().setAccessibleName("repro.status");
+        setStatus(status, "ready");
+        return status;
+    }
+
+    static void setStatus(JLabel status, String value) {
+        if (status == null) {
+            return;
+        }
+        status.setText(value);
+        status.getAccessibleContext().setAccessibleDescription(value);
     }
 }
