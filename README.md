@@ -62,6 +62,42 @@ Verify that the public package can be imported:
 python -c "from play_jab import PlayJabError; print(PlayJabError.__name__)"
 ```
 
+## Synchronous API
+
+```python
+from play_jab.sync_api import PlayJab, contains
+
+with PlayJab(timeout=5_000) as jab:
+    app = jab.launch(["java", "-jar", "application.jar"])
+    window = app.window(title="Application")
+    button = window.get_by_role("push button", name=contains("Save"))
+    button.wait_for(state="visible")
+    button.click()
+```
+
+`attach(hwnd=...)`, `attach(pid=...)`, and `attach(title=...)` connect to an
+existing process. Window titles and ordinary string locators use exact,
+case-sensitive matching. Locators are lazy and acquire fresh JAB contexts for
+every operation; snapshots and accessibility trees contain copied metadata and
+do not own Java references. Closing `PlayJab` never terminates a process started
+with `launch()`.
+
+`click()` uses the element's synchronous JAB `AccessibleAction`. When its
+handler opens a modal `JDialog`, the call can remain blocked until that dialog
+closes; no other operation can use the serialized bridge worker meanwhile.
+Use the explicit physical-input path for controls that open windows:
+
+```python
+with app.expect_window(title="Confirmation") as pending:
+    window.get_by_name("open.confirmation").click(opens_window=True)
+dialog = pending.value
+dialog.get_by_name("confirmation.ok").click()
+```
+
+The opt-in mouse path requires an interactive Windows desktop session. It does
+not fall back automatically from JAB and restores the cursor position and the
+calling thread's DPI-awareness context after the click.
+
 See the **[Getting Started guide](docs/getting-started.md)** for environment
 checks, JAB setup, currently available imports, and troubleshooting.
 
