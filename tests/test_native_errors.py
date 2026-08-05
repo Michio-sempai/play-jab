@@ -198,17 +198,17 @@ def test_an_absent_window_is_reported_before_any_context_is_asked_for(
 def test_a_wedged_native_call_blocks_every_caller_with_no_diagnostic() -> None:
     """Documents an accepted limitation, not a behaviour anyone wants.
 
-    Every call is serialized onto the one worker thread, so a native call that
-    does not return blocks every other caller on every thread, silently. The
-    known instance is ``doAccessibleActions`` on a handler that synchronously
-    opens a modal dialog.
+    Every call is serialized onto the one worker thread, so any native call that
+    does not return would block every other caller on every thread, silently.
+    A synchronous AccessibleAction that opens a modal ``JDialog`` is one known
+    instance: ``doAccessibleActions`` may remain blocked until the dialog closes.
 
     A call timeout was considered and rejected: an in-flight ctypes call cannot
     be safely cancelled (CONCEPT section 7, which leaves a watchdog to post-MVP),
     so a deadline could not repair anything and would instead invent failures on
-    calls that are legitimately slow - the modal-dialog case being exactly one of
-    those. What *is* guaranteed is narrower: a call the worker has dequeued is
-    always completed rather than abandoned, even if the worker dies mid-turn.
+    calls that are legitimately slow. What *is* guaranteed is narrower: a call
+    the worker has dequeued is always completed rather than abandoned, even if
+    the worker dies mid-turn.
     """
     backend = BlocksUntilReleased({WINDOW_HWND: tree()})
     bridge = BridgeRuntime(lambda: backend, pump_interval=PUMP_INTERVAL)

@@ -31,7 +31,12 @@ def build_tree() -> FakeNode:
         role_en_us="frame",
         states_en_us="visible,showing",
         children=[
-            FakeNode(name="Sign in", role_en_us="push button"),
+            FakeNode(
+                name="Sign in",
+                role_en_us="push button",
+                accessible_action=True,
+                actions=("click",),
+            ),
             FakeNode(name="Cancel", role_en_us="push button"),
         ],
     )
@@ -169,6 +174,48 @@ def test_a_stale_context_is_a_normal_outcome_not_a_crash() -> None:
         root.close()
         assert backend.released == 1
         assert bridge.live_ref_count == 0
+
+
+def test_accessible_action_is_read_and_executed_on_an_owned_reference(
+    runtime: tuple[BridgeRuntime, FakeBackend],
+) -> None:
+    bridge, backend = runtime
+    with bridge.context_from_hwnd(WINDOW_HWND) as root:
+        child = bridge.child(root, 0)
+        assert child is not None
+        with child:
+            assert bridge.accessible_actions(child) == ("click",)
+            bridge.do_accessible_actions(child, ("click",))
+    assert bridge.live_ref_count == 0
+    assert backend.acquired == backend.released
+
+
+def test_unknown_accessible_action_reports_the_native_failure_index(
+    runtime: tuple[BridgeRuntime, FakeBackend],
+) -> None:
+    bridge, _ = runtime
+    with bridge.context_from_hwnd(WINDOW_HWND) as root:
+        child = bridge.child(root, 0)
+        assert child is not None
+        with child, pytest.raises(NativeCallError) as caught:
+            bridge.do_accessible_actions(child, ("missing",))
+    assert caught.value.function == "doAccessibleActions"
+    assert caught.value.arguments["failure_index"] == 0
+    assert bridge.live_ref_count == 0
+
+
+def test_stale_context_action_calls_are_translated_without_a_leak(
+    runtime: tuple[BridgeRuntime, FakeBackend],
+) -> None:
+    bridge, backend = runtime
+    with bridge.context_from_hwnd(WINDOW_HWND) as root:
+        child = bridge.child(root, 0)
+        assert child is not None
+        backend.make_stale(child.value)
+        with child, pytest.raises(NativeCallError, match="getAccessibleActions"):
+            bridge.accessible_actions(child)
+    assert bridge.live_ref_count == 0
+    assert backend.acquired == backend.released
 
 
 def test_the_two_closed_errors_cannot_be_conflated() -> None:

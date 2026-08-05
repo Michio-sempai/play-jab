@@ -55,6 +55,7 @@ def tree() -> FakeNode:
                 height=24,
                 accessible_component=True,
                 accessible_action=True,
+                actions=("click", "toggle"),
                 accessible_interfaces=3,
             )
         ],
@@ -311,6 +312,22 @@ def test_geometry_and_interface_flags_survive_the_round_trip(
         accessible_text=False,
         accessible_interfaces=3,
     )
+
+
+def test_action_calls_follow_cookie_and_stale_semantics(
+    backend: FakeBackend,
+) -> None:
+    root = context_of(backend, WINDOW_HWND)
+    child = backend.get_accessible_child_from_context(backend.vm_id, root, 0)
+    assert backend.get_accessible_actions(backend.vm_id, child) == (
+        "click",
+        "toggle",
+    )
+    assert backend.do_accessible_actions(backend.vm_id, child, ("click",)) == (True, -1)
+
+    backend.make_stale(child)
+    assert backend.get_accessible_actions(backend.vm_id, child) is None
+    assert backend.do_accessible_actions(backend.vm_id, child, ("click",)) == (False, 0)
 
 
 # -- lifecycle bookkeeping -------------------------------------------------

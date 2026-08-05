@@ -19,7 +19,13 @@ import pytest
 
 from play_jab._native import backend as backend_module
 from play_jab._native.backend import DllBackend
-from play_jab._native.types import AccessibleContext, AccessibleContextInfo
+from play_jab._native.types import (
+    AccessibleActions,
+    AccessibleActionsToDo,
+    AccessibleContext,
+    AccessibleContextInfo,
+    jint,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="DllBackend binds Windows system libraries"
@@ -57,6 +63,12 @@ class StubDll:
         self.child_cookie = CHILD_COOKIE
         self.parent_cookie = PARENT_COOKIE
         self.hwnd_result = WINDOW_HWND
+        self.accessible_actions_result = TRUE
+        self.actions = ("click", "toggle")
+        self.actions_count: int | None = None
+        self.do_actions_result = TRUE
+        self.failure_index = -1
+        self.actions_done: tuple[str, ...] | None = None
         self.probe_error: Exception | None = None
 
     def Windows_run(self) -> None:
@@ -119,6 +131,35 @@ class StubDll:
     def getHWNDFromAccessibleContext(self, vm_id: int, context: int) -> int:
         assert (vm_id, context) == (VM_ID, CONTEXT)
         return self.hwnd_result
+
+    def getAccessibleActions(
+        self, vm_id: int, context: int, actions_reference: object
+    ) -> int:
+        assert (vm_id, context) == (VM_ID, CONTEXT)
+        if not self.accessible_actions_result:
+            return FALSE
+        actions = out_parameter(actions_reference, AccessibleActions)
+        actions.actionsCount = (
+            len(self.actions) if self.actions_count is None else self.actions_count
+        )
+        for index, name in enumerate(self.actions):
+            actions.actionInfo[index].name = name
+        return TRUE
+
+    def doAccessibleActions(
+        self,
+        vm_id: int,
+        context: int,
+        actions_reference: object,
+        failure_reference: object,
+    ) -> int:
+        assert (vm_id, context) == (VM_ID, CONTEXT)
+        actions = out_parameter(actions_reference, AccessibleActionsToDo)
+        self.actions_done = tuple(
+            actions.actions[index].name for index in range(actions.actionsCount)
+        )
+        out_parameter(failure_reference, jint).value = self.failure_index
+        return self.do_actions_result
 
 
 @pytest.fixture
@@ -208,6 +249,48 @@ def test_release_reaches_the_dll_once_per_call(
     backend.release_java_object(VM_ID, CONTEXT)
     backend.release_java_object(VM_ID, HUGE_COOKIE)
     assert stub.released == [(VM_ID, CONTEXT), (VM_ID, HUGE_COOKIE)]
+
+
+def test_accessible_actions_are_decoded_in_native_order(
+    backend: DllBackend,
+) -> None:
+    assert backend.get_accessible_actions(VM_ID, CONTEXT) == ("click", "toggle")
+
+
+def test_false_get_accessible_actions_reports_no_actions(
+    backend: DllBackend, stub: StubDll
+) -> None:
+    stub.accessible_actions_result = FALSE
+    assert backend.get_accessible_actions(VM_ID, CONTEXT) is None
+
+
+@pytest.mark.parametrize("count", [-1, 257])
+def test_invalid_native_action_count_is_rejected(
+    backend: DllBackend, stub: StubDll, count: int
+) -> None:
+    stub.actions_count = count
+    assert backend.get_accessible_actions(VM_ID, CONTEXT) is None
+
+
+def test_do_accessible_actions_marshals_names_and_returns_failure_index(
+    backend: DllBackend, stub: StubDll
+) -> None:
+    assert backend.do_accessible_actions(VM_ID, CONTEXT, ("click", "toggle")) == (
+        True,
+        -1,
+    )
+    assert stub.actions_done == ("click", "toggle")
+
+
+def test_do_accessible_actions_preserves_native_failure_details(
+    backend: DllBackend, stub: StubDll
+) -> None:
+    stub.do_actions_result = FALSE
+    stub.failure_index = 1
+    assert backend.do_accessible_actions(VM_ID, CONTEXT, ("click", "toggle")) == (
+        False,
+        1,
+    )
 
 
 def test_a_faulting_dll_propagates_the_error_unchanged(

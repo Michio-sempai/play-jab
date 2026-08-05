@@ -19,6 +19,8 @@ from play_jab._native.functions import REQUIRED_EXPORTS, configure_functions
 from play_jab._native.types import (
     BOOL,
     HWND,
+    AccessibleActions,
+    AccessibleActionsToDo,
     AccessibleContext,
     AccessibleContextInfo,
     JavaObject,
@@ -101,6 +103,21 @@ def test_get_hwnd_from_accessible_context(configured: _StubDll) -> None:
         [_VM_ID, AccessibleContext],
         HWND,
     )
+
+
+def test_get_accessible_actions(configured: _StubDll) -> None:
+    expected = [_VM_ID, AccessibleContext, ctypes.POINTER(AccessibleActions)]
+    assert signature_of(configured, "getAccessibleActions") == (expected, BOOL)
+
+
+def test_do_accessible_actions(configured: _StubDll) -> None:
+    expected = [
+        _VM_ID,
+        AccessibleContext,
+        ctypes.POINTER(AccessibleActionsToDo),
+        ctypes.POINTER(jint),
+    ]
+    assert signature_of(configured, "doAccessibleActions") == (expected, BOOL)
 
 
 def test_every_required_export_is_configured(configured: _StubDll) -> None:

@@ -16,8 +16,13 @@ import pytest
 from play_jab._native.types import (
     BOOL,
     JOBJECT64,
+    MAX_ACTION_INFO,
+    MAX_ACTIONS_TO_DO,
     MAX_STRING_SIZE,
     SHORT_STRING_SIZE,
+    AccessibleActionInfo,
+    AccessibleActions,
+    AccessibleActionsToDo,
     AccessibleContextInfo,
     jint,
     jlong,
@@ -32,6 +37,7 @@ _LONG_STRING_BYTES = MAX_STRING_SIZE * WCHAR_SIZE
 _SHORT_STRING_BYTES = SHORT_STRING_SIZE * WCHAR_SIZE
 _STRINGS_BYTES = 2 * _LONG_STRING_BYTES + 4 * _SHORT_STRING_BYTES
 _CONTEXT_INFO_SIZE = _STRINGS_BYTES + 6 * JINT_SIZE + 5 * BOOL_SIZE
+_ACTION_INFO_SIZE = SHORT_STRING_SIZE * WCHAR_SIZE
 
 windows_wchar_only = pytest.mark.skipif(
     sys.platform != "win32",
@@ -71,6 +77,27 @@ def test_context_info_field_offsets() -> None:
     }
     actual = {name: getattr(AccessibleContextInfo, name).offset for name in expected}
     assert actual == expected
+
+
+@windows_wchar_only
+def test_accessible_action_structures_match_the_jdk_17_header() -> None:
+    assert ctypes.sizeof(AccessibleActionInfo) == _ACTION_INFO_SIZE
+    assert ctypes.sizeof(AccessibleActions) == (
+        JINT_SIZE + MAX_ACTION_INFO * _ACTION_INFO_SIZE
+    )
+    assert ctypes.sizeof(AccessibleActionsToDo) == (
+        JINT_SIZE + MAX_ACTIONS_TO_DO * _ACTION_INFO_SIZE
+    )
+    assert AccessibleActions.actionsCount.offset == 0
+    assert AccessibleActions.actionInfo.offset == JINT_SIZE
+    assert AccessibleActionsToDo.actionsCount.offset == 0
+    assert AccessibleActionsToDo.actions.offset == JINT_SIZE
+
+
+def test_accessible_action_names_are_inline_fixed_size_text() -> None:
+    action = AccessibleActionInfo()
+    action.name = "CLICK"
+    assert action.name == "CLICK"
 
 
 def test_fixed_size_text_fields_decode_as_str() -> None:
