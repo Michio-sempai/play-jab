@@ -76,6 +76,8 @@ class FakeNode:
     actions: tuple[str, ...] = ()
     text: str | None = None
     value: str | None = None
+    minimum_value: str | None = None
+    maximum_value: str | None = None
     focused: bool = False
     selected_children: set[int] = field(default_factory=set)
     table_cells: list[list[FakeNode]] | None = None
@@ -325,6 +327,14 @@ class FakeBackend:
     def get_current_accessible_value(self, vm_id: int, context: int) -> str | None:
         node = self._resolve(vm_id, context)
         return None if node is None else node.value
+
+    def get_minimum_accessible_value(self, vm_id: int, context: int) -> str | None:
+        node = self._resolve(vm_id, context)
+        return None if node is None else node.minimum_value
+
+    def get_maximum_accessible_value(self, vm_id: int, context: int) -> str | None:
+        node = self._resolve(vm_id, context)
+        return None if node is None else node.maximum_value
 
     def set_text_contents(self, vm_id: int, context: int, text: str) -> bool:
         node = self._resolve(vm_id, context)

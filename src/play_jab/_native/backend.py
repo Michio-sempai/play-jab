@@ -201,6 +201,10 @@ class NativeBackend(Protocol):
 
     def get_current_accessible_value(self, vm_id: int, context: int) -> str | None: ...
 
+    def get_minimum_accessible_value(self, vm_id: int, context: int) -> str | None: ...
+
+    def get_maximum_accessible_value(self, vm_id: int, context: int) -> str | None: ...
+
     def set_text_contents(self, vm_id: int, context: int, text: str) -> bool: ...
 
     def request_focus(self, vm_id: int, context: int) -> bool: ...
@@ -449,6 +453,25 @@ class DllBackend:
         ):
             return None
         return buffer.value
+
+    def _get_accessible_value(
+        self, function_name: str, vm_id: int, context: int
+    ) -> str | None:
+        buffer = ctypes.create_unicode_buffer(MAX_STRING_SIZE)
+        function = getattr(self._dll, function_name)
+        if not function(vm_id, context, buffer, MAX_STRING_SIZE):
+            return None
+        return buffer.value
+
+    def get_minimum_accessible_value(self, vm_id: int, context: int) -> str | None:
+        return self._get_accessible_value(
+            "getMinimumAccessibleValueFromContext", vm_id, context
+        )
+
+    def get_maximum_accessible_value(self, vm_id: int, context: int) -> str | None:
+        return self._get_accessible_value(
+            "getMaximumAccessibleValueFromContext", vm_id, context
+        )
 
     def set_text_contents(self, vm_id: int, context: int, text: str) -> bool:
         return bool(self._dll.setTextContents(vm_id, context, text))

@@ -87,6 +87,8 @@ REQUIRED_EXPORTS: Final = (
     "getAccessibleTextInfo",
     "getAccessibleTextRange",
     "getCurrentAccessibleValueFromContext",
+    "getMinimumAccessibleValueFromContext",
+    "getMaximumAccessibleValueFromContext",
     "setTextContents",
     "requestFocus",
     "addAccessibleSelectionFromContext",
@@ -209,6 +211,18 @@ def configure_functions(dll: ctypes.CDLL) -> None:  # noqa: PLR0915
         ctypes.c_short,
     ]
     dll.getCurrentAccessibleValueFromContext.restype = BOOL
+    for function_name in (
+        "getMinimumAccessibleValueFromContext",
+        "getMaximumAccessibleValueFromContext",
+    ):
+        function = getattr(dll, function_name)
+        function.argtypes = [
+            ctypes.c_long,
+            AccessibleContext,
+            ctypes.POINTER(ctypes.c_wchar),
+            ctypes.c_short,
+        ]
+        function.restype = BOOL
     dll.setTextContents.argtypes = [
         ctypes.c_long,
         AccessibleContext,

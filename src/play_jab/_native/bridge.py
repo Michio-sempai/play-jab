@@ -568,6 +568,23 @@ class BridgeRuntime:
 
         return self._call(operation)
 
+    def accessible_value_range(
+        self, ref: JavaRef
+    ) -> tuple[str | None, str | None, str | None]:
+        """Return current, minimum and maximum AccessibleValue strings."""
+
+        def operation(
+            backend: NativeBackend,
+        ) -> tuple[str | None, str | None, str | None]:
+            vm_id, value = self._unwrap_reference(ref)
+            return (
+                backend.get_current_accessible_value(vm_id, value),
+                backend.get_minimum_accessible_value(vm_id, value),
+                backend.get_maximum_accessible_value(vm_id, value),
+            )
+
+        return self._call(operation)
+
     def set_text_contents(self, ref: JavaRef, text: str) -> None:
         """Replace editable text contents."""
         if len(text) >= MAX_STRING_SIZE:
@@ -721,12 +738,12 @@ class BridgeRuntime:
 
         self._call(operation)
 
-    def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...]:
-        def operation(backend: NativeBackend) -> tuple[JavaRef, ...]:
+    def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...] | None:
+        def operation(backend: NativeBackend) -> tuple[JavaRef, ...] | None:
             vm_id, value = self._unwrap_reference(ref)
             children = backend.get_visible_children(vm_id, value)
             if children is None:
-                raise NativeCallError("getVisibleChildren", vmID=vm_id, ac=value)
+                return None
             return tuple(self._own(vm_id, child) for child in children if child)
 
         return self._call(operation)
