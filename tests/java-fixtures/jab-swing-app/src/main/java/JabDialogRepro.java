@@ -17,12 +17,14 @@ import javax.swing.SwingUtilities;
 import javax.swing.WindowConstants;
 
 /**
- * Regression fixture: Java Access Bridge теряет доступ к окнам, пока открыт
- * JDialog, показанный поверх уже видимого и уже опрошенного через JAB главного
- * окна. Никаких внешних зависимостей — чистый AWT/Swing.
+ * Regression fixture: Java Access Bridge временно теряет доступ к окнам, пока
+ * открыт {@link JDialog} из синхронного JAB action dispatch. Нативный
+ * {@code doAccessibleActions} может оставаться заблокированным до закрытия
+ * диалога, поэтому сериализованный JAB worker в это время недоступен.
+ * Никаких внешних зависимостей — чистый AWT/Swing.
  *
- * <p>Портировано без изменений поведения из {@code .todo/jdialog_bug/java-app}.
- * Accessible-имена, заголовки окон и набор сценариев (A/B/C и
+ * <p>Поведение исходных A/B/C портировано из {@code .todo/jdialog_bug/java-app}.
+ * Accessible-имена, заголовки окон и набор сценариев (A/B/C, вложенный и
  * {@code -Ddialog.first=true}) являются контрактом интеграционных тестов и не
  * должны меняться. Общая fixture живёт отдельно в {@link SwingFixtureApp}.
  *
@@ -34,6 +36,8 @@ import javax.swing.WindowConstants;
  *   repro.modeless.dialog / .input / .ok  — диалог Сценария A и его поля
  *   repro.modal.dialog / .input / .ok     — диалог Сценария B и его поля
  *   repro.invokeandwait.dialog / .input / .ok — диалог Сценария C и его поля
+ *   repro.invokeandwait.open_nested       — кнопка вложенного модального сценария
+ *   repro.nested.dialog / .input / .ok    — вложенный диалог из Сценария C
  *   repro.first.dialog / .input / .ok     — диалог, показанный первым окном
  *                                            процесса (см. -Ddialog.first=true)
  *
@@ -42,6 +46,7 @@ import javax.swing.WindowConstants;
  *   "Scenario A"        — диалог Сценария A
  *   "Scenario B"         — диалог Сценария B
  *   "Scenario C"         — диалог Сценария C
+ *   "Scenario Nested"    — вложенный диалог, открытый из Сценария C
  *   "Scenario First"     — диалог "первое окно процесса"
  */
 public final class JabDialogRepro {
@@ -51,7 +56,8 @@ public final class JabDialogRepro {
         SwingUtilities.invokeLater(() -> {
             if (dialogFirst) {
                 // Диалог — самое первое top-level окно процесса, до
-                // JAB-опроса чего-либо ещё. Проверка гипотезы "первое окно".
+                // JAB-опроса чего-либо ещё. Отдельная диагностика, не доказательство
+                // причины регрессии A/B.
                 showModalDialog(null, "Scenario First", "first");
                 return;
             }
@@ -87,7 +93,13 @@ public final class JabDialogRepro {
         frame.setVisible(true);
     }
 
-    /** Сценарий A: MODELESS + ручная блокировка через SecondaryLoop. */
+    /**
+     * Сценарий A: MODELESS + ожидание через {@link SecondaryLoop}.
+     *
+     * <p>{@code SecondaryLoop.enter()} не останавливает EDT: вложенный цикл
+     * продолжает обрабатывать события. Существенно то, что вызванный через JAB
+     * listener не завершается до закрытия диалога.
+     */
     private static void showModelessDialog(JFrame parent) {
         Window owner = SwingUtilities.getWindowAncestor(parent);
         JDialog dialog = new JDialog(owner, "Scenario A", Dialog.ModalityType.MODELESS);
@@ -107,37 +119,45 @@ public final class JabDialogRepro {
     }
 
     /**
-     * Сценарий B (и режим "первое окно" при parent == null): настоящая AWT-модальность.
+     * Сценарий B (и диагностический режим "первое окно" при owner == null):
+     * настоящая AWT-модальность.
      *
-     * @param parent       владелец диалога (null — диалог первым окном процесса)
+     * @param owner        владелец диалога (null — диалог первым окном процесса)
      * @param title        заголовок окна (используется для поиска через win32gui.FindWindow)
      * @param namePrefix   префикс accessible-имён (repro.<namePrefix>.*)
      */
-    private static void showModalDialog(JFrame parent, String title, String namePrefix) {
-        Window owner = parent == null ? null : SwingUtilities.getWindowAncestor(parent);
+    private static void showModalDialog(Window owner, String title, String namePrefix) {
+        showModalDialog(owner, title, namePrefix, false);
+    }
+
+    private static void showModalDialog(
+            Window owner, String title, String namePrefix, boolean includeNestedButton) {
         JDialog dialog = new JDialog(owner, title, Dialog.ModalityType.APPLICATION_MODAL);
         dialog.getAccessibleContext().setAccessibleName("repro." + namePrefix + ".dialog");
         dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-        buildDialogContent(dialog, "repro." + namePrefix);
+        buildDialogContent(dialog, "repro." + namePrefix, includeNestedButton);
         dialog.setVisible(true); // штатная модальная блокировка AWT
-        if (parent == null) {
+        if (owner == null) {
             System.exit(0); // единственное окно процесса — после закрытия выходим
         }
     }
 
     /**
-     * Сценарий C: тот же APPLICATION_MODAL показ, что и Сценарий B, но dialog.setVisible(true)
-     * вызывается через SwingUtilities.invokeAndWait(...) с обычного (не-EDT) потока, а не
-     * напрямую внутри ActionListener. ActionListener на EDT возвращается немедленно, не дожидаясь
-     * закрытия диалога -- проверка гипотезы H2 (INVESTIGATION.md): зависит ли поломка JAB от того,
-     * что модальный показ стартует рекурсивно внутри уже выполняющегося actionPerformed(), а не
-     * как "свежая" верхнеуровневая итерация EDT.
+     * Сценарий C: тот же APPLICATION_MODAL показ, что и Сценарий B, но
+     * {@code dialog.setVisible(true)} вызывается через
+     * {@code SwingUtilities.invokeAndWait(...)} с обычного (не-EDT) потока.
+     * Исходный ActionListener на EDT быстро возвращается, поэтому инициированный
+     * JAB dispatch завершается, а открытый диалог остаётся доступен через JAB.
+     * Кнопка {@code repro.invokeandwait.open_nested} внутри C снова открывает
+     * APPLICATION_MODAL синхронно из собственного listener и воспроизводит
+     * проблему уже для вложенного диалога.
      */
     private static void showModalDialogViaInvokeAndWait(JFrame parent) {
         Thread invoker = new Thread(() -> {
             try {
                 SwingUtilities.invokeAndWait(
-                        () -> showModalDialog(parent, "Scenario C", "invokeandwait"));
+                        () -> showModalDialog(
+                                parent, "Scenario C", "invokeandwait", true));
             } catch (InterruptedException | InvocationTargetException e) {
                 throw new RuntimeException(e);
             }
@@ -147,6 +167,11 @@ public final class JabDialogRepro {
     }
 
     private static void buildDialogContent(JDialog dialog, String namePrefix) {
+        buildDialogContent(dialog, namePrefix, false);
+    }
+
+    private static void buildDialogContent(
+            JDialog dialog, String namePrefix, boolean includeNestedButton) {
         JTextField input = new JTextField(30);
         input.getAccessibleContext().setAccessibleName(namePrefix + ".input");
 
@@ -155,6 +180,15 @@ public final class JabDialogRepro {
         ok.addActionListener(e -> dialog.dispose());
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        if (includeNestedButton) {
+            JButton openNested = new JButton("Open nested modal");
+            openNested
+                    .getAccessibleContext()
+                    .setAccessibleName("repro.invokeandwait.open_nested");
+            openNested.addActionListener(
+                    e -> showModalDialog(dialog, "Scenario Nested", "nested"));
+            buttons.add(openNested);
+        }
         buttons.add(ok);
 
         JPanel content = new JPanel(new BorderLayout(0, 12));

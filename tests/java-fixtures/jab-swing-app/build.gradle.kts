@@ -43,7 +43,7 @@ tasks.named<JavaExec>("run") {
 
 tasks.register<JavaExec>("runDialogRepro") {
     group = "application"
-    description = "Show the JDialog modal-hang regression fixture (Scenarios A/B/C)."
+    description = "Show the JDialog JAB-access regression fixture (Scenarios A/B/C)."
     mainClass.set("FixtureLauncher")
     classpath = sourceSets["main"].runtimeClasspath
     jvmArgs = jabJvmArgs
@@ -53,8 +53,8 @@ tasks.register<JavaExec>("runDialogRepro") {
 tasks.register<JavaExec>("runDialogFirst") {
     group = "application"
     description =
-        "Show the modal dialog as the very first top-level window of the process " +
-        "(tests the 'first window vs. window shown over an already JAB-polled one' hypothesis)."
+        "Show the modal dialog as the first top-level window for diagnostics " +
+        "(not a causal proof for the A/B regression)."
     mainClass.set("FixtureLauncher")
     classpath = sourceSets["main"].runtimeClasspath
     jvmArgs = jabJvmArgs + listOf("-Ddialog.first=true")

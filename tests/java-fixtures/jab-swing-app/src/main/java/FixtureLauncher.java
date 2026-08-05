@@ -6,17 +6,17 @@
  * <ul>
  *   <li>{@code swing} (по умолчанию) — {@link SwingFixtureApp}, общая fixture для
  *       интеграционных тестов: button, text/password fields, checkbox, combo/list,
- *       tabs, table и динамически добавляемые элементы.</li>
+ *       tabs, table, locator-сценарии и динамически добавляемые элементы.</li>
  *   <li>{@code dialog} — {@link JabDialogRepro}, узкая regression fixture для
- *       подтверждённого зависания JAB на синхронно открытом модальном
- *       {@code JDialog} (Сценарии A/B/C и режим {@code -Ddialog.first=true}).</li>
+ *       блокировки синхронного JAB action до закрытия модального окна
+ *       (Сценарии A/B/C и режим {@code -Ddialog.first=true}).</li>
  * </ul>
  *
  * <p>Запуск:
  *
  * <pre>
  * java -Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge \
- *      -jar jab-swing-app.jar [swing|dialog]
+ *      -jar jab-swing-app.jar [swing [--second-window]|dialog]
  * </pre>
  *
  * <p>Без флага {@code assistive_technologies} JAB для процесса не активируется
@@ -28,16 +28,20 @@ public final class FixtureLauncher {
     private FixtureLauncher() {
     }
 
-    private static final String ASSISTIVE_TECHNOLOGIES = "javax.accessibility.assistive_technologies";
+    private static final String ASSISTIVE_TECHNOLOGIES =
+            "javax.accessibility.assistive_technologies";
 
     public static void main(String[] args) {
         warnIfBridgeInactive();
         String mode = args.length > 0 ? args[0] : "swing";
         switch (mode) {
-            case "swing" -> SwingFixtureApp.main(new String[0]);
+            case "swing" -> SwingFixtureApp.main(
+                    java.util.Arrays.copyOfRange(args, 1, args.length));
             case "dialog" -> JabDialogRepro.main(new String[0]);
             default -> {
-                System.err.println("Unknown fixture mode: " + mode + " (expected 'swing' or 'dialog')");
+                System.err.println(
+                        "Unknown fixture mode: " + mode
+                                + " (expected 'swing' or 'dialog')");
                 System.exit(2);
             }
         }

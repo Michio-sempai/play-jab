@@ -23,13 +23,15 @@ import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.WindowConstants;
 import javax.swing.table.DefaultTableModel;
 
 /**
  * Общая Swing fixture для интеграционных тестов {@code play-jab}: покрывает
- * button, text/password fields, checkbox, combo/list, tabs, table и
- * динамически добавляемые элементы (CONCEPT.MD → «Тестирование» → Integration).
+ * button, text/password fields, checkbox, combo/list, tabs, table, read-only
+ * locator-сценарии и динамически добавляемые элементы
+ * (CONCEPT.MD → «Тестирование» → Integration).
  *
  * <p>Узкая regression fixture для зависания JAB на модальном {@code JDialog}
  * живёт отдельно в {@link JabDialogRepro} и запускается независимо
@@ -37,18 +39,23 @@ import javax.swing.table.DefaultTableModel;
  * {@code runDialogFirst}).
  *
  * <h2>Заголовок окна</h2>
- * {@code "JAB swing fixture"} — для Win32-поиска, когда JAB недоступен.
+ * {@code "JAB swing fixture"} — главное окно для Win32-поиска. Аргумент
+ * {@code --second-window} добавляет в тот же процесс окно
+ * {@code "JAB swing fixture secondary"}; это детерминированный сценарий
+ * строгого поиска окна без селектора.
  *
  * <h2>Accessible-имена (стабильные, не зависят от локали)</h2>
  * <pre>
  * fixture.main                      JFrame            главное окно fixture
- * fixture.tabs                      JTabbedPane       три вкладки: Form / Table / Dynamic
+ * fixture.tabs                      JTabbedPane       четыре вкладки
  * fixture.tab_form_page             page tab          заголовок вкладки "Form"
  * fixture.tab_table_page            page tab          заголовок вкладки "Table"
  * fixture.tab_dynamic_page          page tab          заголовок вкладки "Dynamic"
+ * fixture.tab_locator_page          page tab          заголовок вкладки "Locator"
  * fixture.tab_form                  JPanel            содержимое вкладки "Form"
  * fixture.tab_table                 JPanel            содержимое вкладки "Table"
  * fixture.tab_dynamic               JPanel            содержимое вкладки "Dynamic"
+ * fixture.tab_locator               JPanel            read-only locator-сценарии
  *
  * fixture.username_field            JTextField        обычный текстовый ввод (fill/clear)
  * fixture.password_field            JPasswordField    password text; содержимое не логируется
@@ -74,7 +81,27 @@ import javax.swing.table.DefaultTableModel;
  * fixture.remove_item_button        JButton           удаляет последний добавленный элемент
  * fixture.dynamic_count_label       JLabel            текущее число элементов
  * fixture.dynamic_item_N            JLabel            N начинается с 1 и не переиспользуется
+ *
+ * fixture.scope_alpha               JPanel            первый scoped-контейнер
+ * fixture.scope_beta                JPanel            второй scoped-контейнер
+ * fixture.duplicate                 JButton x2        одинаковое имя в разных контейнерах
+ * fixture.visible_button            JButton           видимый и enabled
+ * fixture.hidden_button             JButton           в дереве, но setVisible(false)
+ * fixture.locator_disabled_button   JButton           видимый, но disabled
+ * fixture.auto_panel                JPanel            контейнер автоматически меняемого узла
+ * fixture.auto_node                 JLabel            каждые 1500 мс добавляется/удаляется
+ * fixture.secondary                 JFrame            опциональное второе top-level окно
  * </pre>
+
+ * <h2>Read-only locator-сценарии</h2>
+ * Две кнопки {@code fixture.duplicate} намеренно неразличимы по role/name, но
+ * лежат под разными стабильными контейнерами. Их descriptions равны
+ * {@code "duplicate in alpha"} и {@code "duplicate in beta"}. Скрытая кнопка
+ * остаётся дочерним компонентом {@code fixture.tab_locator}, но не получает
+ * visible/showing state. {@code fixture.auto_node} отсутствует при старте,
+ * затем Swing Timer каждые 1500 мс попеременно добавляет и удаляет его. Поэтому
+ * polling-тест может переждать как attached, так и detached независимо от того,
+ * насколько быстро он подключился к процессу.
  *
  * <h2>Как читать текст лейблов</h2>
  * Обычный (не-HTML) {@code JLabel} не публикует {@code AccessibleText}:
@@ -230,6 +257,8 @@ public final class SwingFixtureApp {
     private final JLabel statusLabel = new JLabel();
     private final JPanel dynamicPanel = new JPanel();
     private final JLabel dynamicCountLabel = new JLabel();
+    private final JPanel autoPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+    private final JLabel autoNode = new JLabel("Automatic node");
 
     private JTextField usernameField;
     private JPasswordField passwordField;
@@ -238,12 +267,15 @@ public final class SwingFixtureApp {
     private JList<String> environmentList;
 
     private int dynamicItemsAdded;
+    private boolean autoNodeAttached;
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new SwingFixtureApp().show());
+        boolean secondWindow = Arrays.asList(args).contains("--second-window")
+                || Boolean.getBoolean("fixture.secondWindow");
+        SwingUtilities.invokeLater(() -> new SwingFixtureApp().show(secondWindow));
     }
 
-    private void show() {
+    private void show(boolean secondWindow) {
         JFrame frame = new JFrame("JAB swing fixture");
         frame.getAccessibleContext().setAccessibleName("fixture.main");
         frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
@@ -253,14 +285,20 @@ public final class SwingFixtureApp {
         tabs.addTab("Form", buildFormTab());
         tabs.addTab("Table", buildTableTab());
         tabs.addTab("Dynamic", buildDynamicTab());
+        tabs.addTab("Locator", buildLocatorTab());
         nameTabPage(tabs, 0, "fixture.tab_form_page");
         nameTabPage(tabs, 1, "fixture.tab_table_page");
         nameTabPage(tabs, 2, "fixture.tab_dynamic_page");
+        nameTabPage(tabs, 3, "fixture.tab_locator_page");
 
         frame.add(tabs, BorderLayout.CENTER);
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
+        startAutoNodeCycle();
+        if (secondWindow) {
+            showSecondaryWindow(frame);
+        }
     }
 
     /**
@@ -524,6 +562,109 @@ public final class SwingFixtureApp {
         panel.add(buttons, BorderLayout.SOUTH);
         panel.setPreferredSize(new Dimension(560, 240));
         return panel;
+    }
+
+    /**
+     * Строит независимые от actions сценарии для strictness, scoped traversal и
+     * фильтрации по states. Одинаковые accessible names у duplicate-кнопок
+     * намеренны: уникальность появляется только после разрешения контейнера.
+     */
+    private JPanel buildLocatorTab() {
+        JPanel alpha = buildDuplicateScope("fixture.scope_alpha", "duplicate in alpha");
+        JPanel beta = buildDuplicateScope("fixture.scope_beta", "duplicate in beta");
+
+        JButton visible = new JButton("Visible");
+        visible.getAccessibleContext().setAccessibleName("fixture.visible_button");
+        visible.getAccessibleContext().setAccessibleDescription("visible and enabled");
+
+        JButton hidden = new JButton("Hidden");
+        hidden.getAccessibleContext().setAccessibleName("fixture.hidden_button");
+        hidden.getAccessibleContext().setAccessibleDescription("hidden but attached");
+        hidden.setVisible(false);
+
+        JButton disabled = new JButton("Locator disabled");
+        disabled
+                .getAccessibleContext()
+                .setAccessibleName("fixture.locator_disabled_button");
+        disabled.getAccessibleContext().setAccessibleDescription("visible but disabled");
+        disabled.setEnabled(false);
+
+        autoPanel.getAccessibleContext().setAccessibleName("fixture.auto_panel");
+        autoNode.getAccessibleContext().setAccessibleName("fixture.auto_node");
+        autoNode
+                .getAccessibleContext()
+                .setAccessibleDescription("Автоматический узел · 日本語 · 🚀");
+
+        JPanel statePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        statePanel.getAccessibleContext().setAccessibleName("fixture.state_panel");
+        statePanel.add(visible);
+        statePanel.add(hidden);
+        statePanel.add(disabled);
+
+        JPanel scopes = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        scopes.getAccessibleContext().setAccessibleName("fixture.scopes");
+        scopes.add(alpha);
+        scopes.add(beta);
+
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.getAccessibleContext().setAccessibleName("fixture.tab_locator");
+        panel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+        panel.add(scopes);
+        panel.add(statePanel);
+        panel.add(autoPanel);
+        panel.setPreferredSize(new Dimension(560, 240));
+        return panel;
+    }
+
+    private static JPanel buildDuplicateScope(String name, String description) {
+        JPanel scope = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        scope.getAccessibleContext().setAccessibleName(name);
+        JButton duplicate = new JButton("Duplicate");
+        duplicate.getAccessibleContext().setAccessibleName("fixture.duplicate");
+        duplicate.getAccessibleContext().setAccessibleDescription(description);
+        scope.add(duplicate);
+        return scope;
+    }
+
+    /**
+     * Переключает физическое присутствие auto-node, а не только его visibility.
+     * Повторяющийся цикл исключает гонку между запуском JVM и attach теста.
+     */
+    private void startAutoNodeCycle() {
+        Timer timer = new Timer(1500, event -> {
+            if (autoNodeAttached) {
+                autoPanel.remove(autoNode);
+            } else {
+                autoPanel.add(autoNode);
+            }
+            autoNodeAttached = !autoNodeAttached;
+            autoPanel.revalidate();
+            autoPanel.repaint();
+        });
+        timer.setInitialDelay(1500);
+        timer.start();
+    }
+
+    /** Создаёт второе Java-окно того же PID для проверки strict window discovery. */
+    private static void showSecondaryWindow(JFrame ownerForPlacement) {
+        JFrame secondary = new JFrame("JAB swing fixture secondary");
+        secondary.getAccessibleContext().setAccessibleName("fixture.secondary");
+        secondary
+                .getAccessibleContext()
+                .setAccessibleDescription("optional strict-window fixture");
+        secondary.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+        JLabel content = new JLabel("Secondary window");
+        content.getAccessibleContext().setAccessibleName("fixture.secondary_label");
+        content
+                .getAccessibleContext()
+                .setAccessibleDescription("secondary top-level window");
+        secondary.add(content);
+        secondary.pack();
+        secondary.setLocation(
+                ownerForPlacement.getX() + 40,
+                ownerForPlacement.getY() + 40);
+        secondary.setVisible(true);
     }
 
     private void addDynamicItem() {

@@ -25,9 +25,11 @@ import pytest
 from play_jab._native.backend import NativeBackend, dll_backend_factory
 from play_jab._native.dll import find_access_bridge_dll
 from play_jab.exceptions import BridgeInitializationError
+from play_jab.sync_api import PlayJab
 
 _OPT_IN = "PLAY_JAB_RUN_INTEGRATION"
 _WINDOW_TITLE = "JAB swing fixture"
+_SECONDARY_WINDOW_TITLE = "JAB swing fixture secondary"
 _WINDOW_TIMEOUT = 20.0
 _PROCESS_TIMEOUT = 10.0
 
@@ -35,6 +37,14 @@ _PROCESS_TIMEOUT = 10.0
 @dataclass(frozen=True, slots=True)
 class SwingFixture:
     """A running Swing fixture and the HWND belonging to its process."""
+
+    hwnd: int
+    process: subprocess.Popen[str]
+
+
+@dataclass(frozen=True, slots=True)
+class DialogFixture:
+    """A function-scoped JDialog reproducer and its owner HWND."""
 
     hwnd: int
     process: subprocess.Popen[str]
@@ -76,6 +86,12 @@ def _java_executable() -> str:
 
 
 def _window_for_process(process_id: int) -> int | None:
+    matches = raw_windows(process_id, title=_WINDOW_TITLE)
+    return matches[0] if matches else None
+
+
+def raw_windows(process_id: int, *, title: str | None = None) -> list[int]:
+    """Enumerate raw top-level HWNDs by PID and optional exact title."""
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     enum_callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     matches: list[int] = []
@@ -103,18 +119,17 @@ def _window_for_process(process_id: int) -> int | None:
         if owner.value != process_id:
             return True
         length = user32.GetWindowTextLengthW(hwnd)
-        title = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, title, len(title))
-        if title.value == _WINDOW_TITLE:
+        window_title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, window_title, len(window_title))
+        if title is None or window_title.value == title:
             matches.append(int(hwnd))
-            return False
         return True
 
     if not user32.EnumWindows(visit, None) and not matches:
         error = ctypes.get_last_error()
         if error:
             raise ctypes.WinError(error)
-    return matches[0] if matches else None
+    return matches
 
 
 def _wait_for_window(process: subprocess.Popen[str]) -> int:
@@ -134,6 +149,51 @@ def _wait_for_window(process: subprocess.Popen[str]) -> int:
     pytest.fail(f"Swing fixture did not create {_WINDOW_TITLE!r} within the timeout")
 
 
+def wait_for_raw_window(process: subprocess.Popen[str], title: str) -> int:
+    """Wait for one exact raw HWND, without consulting Java Access Bridge."""
+    deadline = time.monotonic() + _WINDOW_TIMEOUT
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate(timeout=_PROCESS_TIMEOUT)
+            pytest.fail(
+                f"Dialog fixture exited with code {process.returncode}; "
+                f"expected {title!r}.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            )
+        matches = raw_windows(process.pid, title=title)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            pytest.fail(f"multiple raw windows titled {title!r}: {matches!r}")
+        time.sleep(0.05)
+    pytest.fail(
+        f"process {process.pid} did not create {title!r}; "
+        f"raw HWNDs: {raw_windows(process.pid)!r}"
+    )
+
+
+def wait_for_raw_window_closed(process_id: int, title: str) -> None:
+    deadline = time.monotonic() + _WINDOW_TIMEOUT
+    while time.monotonic() < deadline:
+        if not raw_windows(process_id, title=title):
+            return
+        time.sleep(0.05)
+    pytest.fail(f"process {process_id} did not close raw window {title!r}")
+
+
+def close_raw_window(hwnd: int) -> None:
+    """Post WM_CLOSE without making any JAB call."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.PostMessageW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_size_t,
+        ctypes.c_ssize_t,
+    ]
+    user32.PostMessageW.restype = ctypes.c_bool
+    if not user32.PostMessageW(hwnd, 0x0010, 0, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _stop_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -143,6 +203,18 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=_PROCESS_TIMEOUT)
+
+
+def _wait_for_accessible_windows(
+    process: subprocess.Popen[str],
+    dll_path: Path,
+    *titles: str,
+) -> None:
+    """Wait until every expected top-level window is visible through JAB."""
+    with PlayJab(timeout=int(_WINDOW_TIMEOUT * 1_000), dll_path=dll_path) as api:
+        application = api.attach(pid=process.pid)
+        for title in titles:
+            application.window(title=title)
 
 
 @pytest.fixture(scope="session")
@@ -184,6 +256,105 @@ def swing_fixture() -> Iterator[SwingFixture]:
     )
     try:
         yield SwingFixture(_wait_for_window(process), process)
+    finally:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _stop_process(process)
+
+
+@pytest.fixture
+def dialog_fixture() -> Iterator[DialogFixture]:
+    """Start a fresh JVM for one modal-dialog scenario."""
+    root = _fixture_root()
+    _compile_fixture(root)
+    classes = root / "build" / "classes" / "java" / "main"
+    process = subprocess.Popen(
+        [
+            _java_executable(),
+            "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
+            "-cp",
+            str(classes),
+            "FixtureLauncher",
+            "dialog",
+        ],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        yield DialogFixture(wait_for_raw_window(process, "JAB dialog repro"), process)
+    finally:
+        with contextlib.suppress(OSError):
+            for hwnd in raw_windows(process.pid):
+                close_raw_window(hwnd)
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _stop_process(process)
+
+
+@pytest.fixture
+def dialog_first_fixture() -> Iterator[DialogFixture]:
+    """Start the standalone dialog-first diagnostic in a fresh JVM."""
+    root = _fixture_root()
+    _compile_fixture(root)
+    classes = root / "build" / "classes" / "java" / "main"
+    process = subprocess.Popen(
+        [
+            _java_executable(),
+            "-Ddialog.first=true",
+            "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
+            "-cp",
+            str(classes),
+            "FixtureLauncher",
+            "dialog",
+        ],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        yield DialogFixture(wait_for_raw_window(process, "Scenario First"), process)
+    finally:
+        with contextlib.suppress(OSError):
+            for hwnd in raw_windows(process.pid):
+                close_raw_window(hwnd)
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _stop_process(process)
+
+
+@pytest.fixture(scope="session")
+def swing_fixture_with_second_window(
+    jab_dll_path: Path,
+) -> Iterator[SwingFixture]:
+    """Start the locator fixture with two Java top-level windows."""
+    root = _fixture_root()
+    _compile_fixture(root)
+    classes = root / "build" / "classes" / "java" / "main"
+    command = [
+        _java_executable(),
+        "-Djavax.accessibility.assistive_technologies=com.sun.java.accessibility.AccessBridge",
+        "-cp",
+        str(classes),
+        "FixtureLauncher",
+        "swing",
+        "--second-window",
+    ]
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        hwnd = _wait_for_window(process)
+        _wait_for_accessible_windows(
+            process,
+            jab_dll_path,
+            _WINDOW_TITLE,
+            _SECONDARY_WINDOW_TITLE,
+        )
+        yield SwingFixture(hwnd, process)
     finally:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             _stop_process(process)
