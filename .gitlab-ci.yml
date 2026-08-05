@@ -70,7 +70,8 @@ test:
   script:
     # Real JAB tests need an interactive Windows desktop and remain local-only.
     - >-
-      uv run --group test pytest --ignore=tests/integration
+      uv run --python "$PYTHON_VERSION" --group test pytest
+      --ignore=tests/integration
       --cov-report=xml --junitxml=junit.xml
   coverage: '/TOTAL.*\s+(\d+%)$/'
   artifacts:
