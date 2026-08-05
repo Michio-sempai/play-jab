@@ -25,3 +25,6 @@ htmlcov/
 
 # Local Claude settings
 .claude/settings.local.json
+
+# Agent-only working notes, not part of the published project
+.todo/

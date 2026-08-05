@@ -1,7 +1,7 @@
 [project]
 name = "play-jab"
-version = "2026.08"
-description = "Cross-platform desktop GUI automation framework, Playwright-style"
+version = "2026.08.0"
+description = "Playwright-style automation API for Java apps via Java Access Bridge (JAB)"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
@@ -12,7 +12,7 @@ keywords = ["gui", "automation", "testing", "accessibility", "rpa"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -97,11 +97,15 @@ version_provider = "pep621"
 version_scheme = "pep440"
 tag_format = "v$version"
 
-# Calendar versioning: YYYY.0M (e.g. 2026.08, 2026.09, ...). Run `uv run bumpver update`
-# to roll the version to the current month, commit and tag it (see README).
+# Calendar versioning: YYYY.MM.PATCH[PYTAGNUM], e.g. 2026.08.0, 2026.08.1, 2026.09.0.
+# PATCH resets to 0 whenever YYYY.MM changes and otherwise only bumps when explicitly
+# asked (`uv run bumpver update --patch`, see README) - it does not auto-increment on
+# every invocation. PYTAGNUM (optional, in brackets) is a PEP 440 pre/post/dev release
+# tag glued to its number with no separator (a0, b1, rc2, post0, dev3); pass it via
+# `--tag=alpha|beta|rc|dev|post|final` (+ `--tag-num` to bump the number).
 [tool.bumpver]
-current_version = "2026.08"
-version_pattern = "YYYY.0M"
+current_version = "2026.08.0"
+version_pattern = "YYYY.0M.PATCH[PYTAGNUM]"
 commit_message = "bump version to {new_version}"
 tag_message = "v{new_version}"
 commit = true
