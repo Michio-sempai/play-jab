@@ -668,6 +668,7 @@ class DllBackend:
             for name in reversed(registered):
                 getattr(self._dll, name)(None)
             self._callbacks.clear()
+            self._callback_vm_exit = None
             raise
 
     def _clear_event_callbacks(self) -> None:
@@ -685,6 +686,18 @@ class DllBackend:
                 getattr(self._dll, name)(None)
         self._callbacks.clear()
         self._callback_vm_exit = None
+        # Events already queued before unregister still carry two owned JAB
+        # cookies. Release them before unloading the DLL, without delivering
+        # lifecycle notifications during shutdown.
+        while True:
+            try:
+                vm_id, event, source = self._callback_events.get_nowait()
+            except queue.Empty:
+                break
+            if event:
+                self.release_java_object(vm_id, event)
+            if source:
+                self.release_java_object(vm_id, source)
 
     def shutdown(self) -> None:
         """Unload the Access Bridge DLL.
