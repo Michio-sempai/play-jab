@@ -28,6 +28,7 @@ WORKER_THREAD_NAME = "play-jab-bridge"
 UNREACHABLE_FAULT_COUNT = 10**6
 SHORT_TIMEOUT = 0.05
 PUMP_INTERVAL = 0.001
+READY_AFTER_PUMP_TURNS = 3
 HANG_TIMEOUT = 2.0
 UNBLOCK_TIMEOUT = 5.0
 
@@ -144,7 +145,7 @@ def test_a_failing_windows_run_shuts_the_backend_down_once() -> None:
 def test_a_readiness_timeout_shuts_the_backend_down_once() -> None:
     backend, bridge = timing_out_runtime()
     with pytest.raises(BridgeInitializationError):
-        bridge.start()
+        bridge.start(probe_hwnd=WINDOW_HWND)
     assert backend.windows_run_calls == 1
     assert backend.pump_turns >= 1
     assert backend.faults_before_ready < UNREACHABLE_FAULT_COUNT
@@ -161,7 +162,7 @@ def test_a_readiness_timeout_names_the_disabled_bridge(
     )
     _, bridge = timing_out_runtime()
     with pytest.raises(BridgeNotEnabledError, match="jabswitch"):
-        bridge.start()
+        bridge.start(probe_hwnd=WINDOW_HWND)
 
 
 def test_a_readiness_timeout_with_jab_enabled_blames_the_timeout(
@@ -171,9 +172,39 @@ def test_a_readiness_timeout_with_jab_enabled_blames_the_timeout(
         "play_jab._native.bridge.jab_enabled_for_current_user", lambda: True
     )
     _, bridge = timing_out_runtime()
-    with pytest.raises(BridgeInitializationError, match="did not become ready") as info:
-        bridge.start()
+    with pytest.raises(
+        BridgeInitializationError, match="did not become accessible"
+    ) as info:
+        bridge.start(probe_hwnd=WINDOW_HWND)
     assert not isinstance(info.value, BridgeNotEnabledError)
+
+
+def test_start_without_a_probe_only_requires_the_first_pump_turn() -> None:
+    backend, factory = fake_backend_factory(
+        faults_before_ready=UNREACHABLE_FAULT_COUNT,
+    )
+    bridge = BridgeRuntime(factory, ready_timeout=SHORT_TIMEOUT)
+    bridge.start()
+    try:
+        assert backend.pump_turns >= 1
+        assert backend.faults_before_ready == UNREACHABLE_FAULT_COUNT
+    finally:
+        bridge.close()
+
+
+def test_start_with_a_probe_waits_until_the_hwnd_is_recognised() -> None:
+    backend, factory = fake_backend_factory(
+        {WINDOW_HWND: FakeNode(name="Frame")}, faults_before_ready=2
+    )
+    bridge = BridgeRuntime(
+        factory, ready_timeout=SHORT_TIMEOUT, pump_interval=PUMP_INTERVAL
+    )
+    bridge.start(probe_hwnd=WINDOW_HWND)
+    try:
+        assert backend.faults_before_ready == 0
+        assert backend.pump_turns >= READY_AFTER_PUMP_TURNS
+    finally:
+        bridge.close()
 
 
 # -- what remains usable afterwards ----------------------------------------
@@ -237,6 +268,56 @@ def test_starting_a_closed_runtime_is_refused() -> None:
     bridge.close()
     with pytest.raises(BridgeClosedError):
         bridge.start()
+
+
+def test_close_cannot_join_the_worker_before_thread_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_thread = threading.Thread
+    entered_start = threading.Event()
+    allow_start = threading.Event()
+
+    class DelayedStartThread(real_thread):
+        def start(self) -> None:
+            entered_start.set()
+            assert allow_start.wait(UNBLOCK_TIMEOUT)
+            super().start()
+
+    monkeypatch.setattr("play_jab._native.bridge.threading.Thread", DelayedStartThread)
+    _, factory = fake_backend_factory({WINDOW_HWND: FakeNode(name="Frame")})
+    bridge = BridgeRuntime(factory, pump_interval=PUMP_INTERVAL)
+    outcomes: list[BaseException] = []
+
+    def start_runtime() -> None:
+        try:
+            bridge.start()
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    def close_runtime() -> None:
+        try:
+            bridge.close()
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    starter = real_thread(target=start_runtime, daemon=True)
+    closer = real_thread(target=close_runtime, daemon=True)
+    starter.start()
+    assert entered_start.wait(UNBLOCK_TIMEOUT)
+    closer.start()
+    # close() must be waiting for the same lifecycle lock, not joining an
+    # unstarted Thread object.
+    closer.join(0.02)
+    assert closer.is_alive()
+
+    allow_start.set()
+    starter.join(UNBLOCK_TIMEOUT)
+    closer.join(UNBLOCK_TIMEOUT)
+    assert not starter.is_alive()
+    assert not closer.is_alive()
+    assert outcomes == []
+    assert bridge.closed
+    assert worker_threads() == []
 
 
 def test_the_worker_thread_does_not_outlive_the_runtime() -> None:

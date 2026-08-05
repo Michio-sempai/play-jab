@@ -81,6 +81,9 @@ packages = ["play_jab"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=play_jab --cov-report=term-missing"
+markers = [
+    "integration_jab: opt-in tests requiring Windows, a JDK 17 fixture, and Java Access Bridge",
+]
 
 [tool.coverage.run]
 source = ["src/play_jab"]

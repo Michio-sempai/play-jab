@@ -57,7 +57,9 @@ def test_readiness_retries_past_native_faults() -> None:
     backend, factory = fake_backend_factory(
         {WINDOW_HWND: build_tree()}, faults_before_ready=FAULTS_BEFORE_READY
     )
-    with BridgeRuntime(factory, pump_interval=0.001) as bridge:
+    bridge = BridgeRuntime(factory, pump_interval=0.001)
+    bridge.start(probe_hwnd=WINDOW_HWND)
+    with bridge:
         # The probe faulted three times and startup rode it out, so the retry
         # loop is load-bearing rather than decorative.
         assert backend.faults_before_ready == 0
@@ -70,7 +72,7 @@ def test_readiness_timeout_fails_startup() -> None:
     _, factory = fake_backend_factory(faults_before_ready=10**6)
     bridge = BridgeRuntime(factory, ready_timeout=0.05, pump_interval=0.001)
     with pytest.raises(BridgeInitializationError):
-        bridge.start()
+        bridge.start(probe_hwnd=WINDOW_HWND)
     assert bridge.closed
 
 

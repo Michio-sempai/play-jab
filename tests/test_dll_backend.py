@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 
+from play_jab._native import backend as backend_module
 from play_jab._native.backend import DllBackend
 from play_jab._native.types import AccessibleContext, AccessibleContextInfo
 
@@ -227,3 +228,87 @@ def test_pumping_and_shutting_down_are_safe_to_repeat(backend: DllBackend) -> No
     backend.pump_messages()
     backend.shutdown()
     backend.shutdown()
+
+
+@pytest.mark.parametrize("failure_stage", ["verify", "configure", "constructor"])
+def test_load_releases_the_dll_when_backend_construction_fails(
+    monkeypatch: pytest.MonkeyPatch, stub: StubDll, failure_stage: str
+) -> None:
+    error = RuntimeError(f"{failure_stage} failed")
+    released: list[ctypes.CDLL] = []
+
+    monkeypatch.setattr(backend_module, "load_access_bridge", lambda _path: stub)
+    monkeypatch.setattr(backend_module, "_free_library", released.append)
+
+    if failure_stage == "verify":
+        monkeypatch.setattr(
+            backend_module,
+            "verify_exports",
+            lambda *_args: (_ for _ in ()).throw(error),
+        )
+    elif failure_stage == "configure":
+        monkeypatch.setattr(backend_module, "verify_exports", lambda *_args: None)
+        monkeypatch.setattr(
+            backend_module,
+            "configure_functions",
+            lambda *_args: (_ for _ in ()).throw(error),
+        )
+    else:
+        monkeypatch.setattr(backend_module, "verify_exports", lambda *_args: None)
+        monkeypatch.setattr(backend_module, "configure_functions", lambda *_args: None)
+
+        def fail_init(self: DllBackend, _dll: ctypes.CDLL) -> None:
+            raise error
+
+        monkeypatch.setattr(DllBackend, "__init__", fail_init)
+
+    with pytest.raises(RuntimeError, match=failure_stage) as caught:
+        DllBackend.load("bridge.dll")
+
+    assert caught.value is error
+    assert released == [stub]
+
+
+def test_load_does_not_release_the_dll_after_success(
+    monkeypatch: pytest.MonkeyPatch, stub: StubDll
+) -> None:
+    released: list[ctypes.CDLL] = []
+    monkeypatch.setattr(backend_module, "load_access_bridge", lambda _path: stub)
+    monkeypatch.setattr(backend_module, "verify_exports", lambda *_args: None)
+    monkeypatch.setattr(backend_module, "configure_functions", lambda *_args: None)
+    monkeypatch.setattr(backend_module, "_free_library", released.append)
+
+    loaded = DllBackend.load("bridge.dll")
+
+    assert isinstance(loaded, DllBackend)
+    assert released == []
+    loaded.shutdown()
+    loaded.shutdown()
+    assert released == [stub]
+
+
+def test_free_library_failure_does_not_mask_load_error(
+    monkeypatch: pytest.MonkeyPatch, stub: StubDll
+) -> None:
+    original = RuntimeError("missing export")
+
+    class RaisingFreeLibrary:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, _handle: object) -> None:
+            raise OSError("FreeLibrary failed")
+
+    class Kernel32Stub:
+        FreeLibrary = RaisingFreeLibrary()
+
+    monkeypatch.setattr(backend_module, "load_access_bridge", lambda _path: stub)
+    monkeypatch.setattr(
+        backend_module, "verify_exports", lambda *_args: (_ for _ in ()).throw(original)
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: Kernel32Stub())
+
+    with pytest.raises(RuntimeError, match="missing export") as caught:
+        DllBackend.load("bridge.dll")
+
+    assert caught.value is original

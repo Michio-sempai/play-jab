@@ -71,12 +71,12 @@ class FakeNode:
     @property
     def localized_role(self) -> str:
         """The localized role; defaults to the ``en_US`` spelling."""
-        return self.role if self.role is not None else self.role_en_us
+        return self.role_en_us if self.role is None else self.role
 
     @property
     def localized_states(self) -> str:
         """The localized states; defaults to the ``en_US`` spelling."""
-        return self.states if self.states is not None else self.states_en_us
+        return self.states_en_us if self.states is None else self.states
 
 
 class FakeBackend:

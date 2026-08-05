@@ -28,7 +28,7 @@ class BridgeInitializationError(PlayJabError):
 
 
 class BridgeNotEnabledError(BridgeInitializationError):
-    """Java Access Bridge is not enabled for the current user.
+    r"""Java Access Bridge is not enabled for the current user.
 
     Raised instead of the generic initialization error when the bridge never
     becomes ready and the user's ``.accessibility.properties`` does not enable
@@ -79,5 +79,6 @@ class NativeCallError(PlayJabError):
     def __init__(self, function: str, /, **arguments: object) -> None:
         self.function = function
         self.arguments = dict(arguments)
-        rendered = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
+        parts = (f"{key}={value!r}" for key, value in arguments.items())
+        rendered = ", ".join(parts)
         super().__init__(f"native call {function}({rendered}) failed")

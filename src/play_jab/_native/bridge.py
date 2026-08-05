@@ -26,7 +26,7 @@ __all__ = ["DEFAULT_PUMP_INTERVAL", "DEFAULT_READY_TIMEOUT", "BridgeRuntime"]
 _T = TypeVar("_T")
 
 DEFAULT_READY_TIMEOUT = 5.0
-"""Seconds to wait for the bridge to become callable after ``Windows_run``."""
+"""Seconds to wait for a supplied Java window to become accessible."""
 
 DEFAULT_PUMP_INTERVAL = 0.01
 """Longest the worker may block on the command queue before pumping again."""
@@ -35,7 +35,6 @@ _INITIAL_PROBE_DELAY = 0.005
 _MAX_PROBE_DELAY = 0.2
 _SHUTDOWN_JOIN_TIMEOUT = 5.0
 _CLOSED_MESSAGE = "bridge runtime is closed"
-_NULL_HWND = 0
 
 
 class _Call:
@@ -48,6 +47,22 @@ class _Call:
         self.done = threading.Event()
         self.result: object = None
         self.error: BaseException | None = None
+
+
+def _execute_call(call: _Call, function: Callable[[], object]) -> None:
+    try:
+        call.result = function()
+    except BaseException as exc:
+        call.error = exc
+    finally:
+        call.done.set()
+
+
+def _probe_java_window(backend: NativeBackend, probe_hwnd: int) -> bool:
+    try:
+        return backend.is_java_window(probe_hwnd)
+    except OSError:
+        return False
 
 
 class BridgeRuntime:
@@ -90,18 +105,28 @@ class BridgeRuntime:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self) -> None:
-        """Start the worker thread and wait until the bridge is usable."""
+    def start(self, *, probe_hwnd: int | None = None) -> None:
+        """Start the worker, optionally waiting for one Java window to respond.
+
+        Without ``probe_hwnd``, startup guarantees that ``Windows_run`` has
+        completed and the message pump has turned once. With it, startup also
+        waits until that HWND is recognised by Java Access Bridge.
+        """
         with self._lock:
             if self._closed:
                 raise BridgeClosedError(_CLOSED_MESSAGE)
             if self._thread is not None:
                 raise BridgeInitializationError("bridge runtime is already started")
             self._thread = threading.Thread(
-                target=self._worker, name="play-jab-bridge", daemon=True
+                target=self._worker,
+                args=(probe_hwnd,),
+                name="play-jab-bridge",
+                daemon=True,
             )
             thread = self._thread
-        thread.start()
+            # Starting while holding the lifecycle lock prevents close() from
+            # observing a published Thread whose start() has not happened yet.
+            thread.start()
         self._started.wait()
         if self._startup_error is not None:
             thread.join(timeout=_SHUTDOWN_JOIN_TIMEOUT)
@@ -150,100 +175,95 @@ class BridgeRuntime:
 
     # -- worker thread -----------------------------------------------------
 
-    def _worker(self) -> None:
+    def _worker(self, probe_hwnd: int | None) -> None:
         backend: NativeBackend | None = None
         try:
             backend = self._backend_factory()
-            backend.windows_run()
-            self._await_ready(backend)
+            self._start_backend(backend, probe_hwnd)
         except BaseException as exc:
-            self._startup_error = exc
-            self._mark_closed()
-            # Cleanup must never be able to strand start(). A backend whose
-            # shutdown raises is already violating the protocol, but it must
-            # still not turn a diagnosable startup failure into a hang: the
-            # waiter is released either way, and the original cause is what
-            # start() reports.
-            try:
-                if backend is not None:
-                    backend.shutdown()
-            finally:
-                self._started.set()
-                self._reject_pending()
+            self._finish_failed_start(backend, exc)
             return
+        self._run_backend(backend)
 
+    def _start_backend(self, backend: NativeBackend, probe_hwnd: int | None) -> None:
+        backend.windows_run()
+        self._await_ready(backend, probe_hwnd)
+
+    def _finish_failed_start(
+        self,
+        backend: NativeBackend | None,
+        error: BaseException,
+    ) -> None:
+        self._startup_error = error
+        self._mark_closed()
+        # Cleanup must never strand start(). Even if a broken backend raises
+        # during shutdown, the waiter is released and reports the first error.
+        try:
+            if backend is not None:
+                backend.shutdown()
+        finally:
+            self._started.set()
+            self._reject_pending()
+
+    def _run_backend(self, backend: NativeBackend) -> None:
         self._backend = backend
         self._started.set()
         try:
             self._serve(backend)
         finally:
-            self._mark_closed()
-            self._backend = None
-            try:
-                backend.shutdown()
-            finally:
-                # Same reasoning: whatever happens to the DLL, callers waiting
-                # on this worker have to be woken.
-                self._fail_in_flight()
-                self._reject_pending()
+            self._finish_backend(backend)
+
+    def _finish_backend(self, backend: NativeBackend) -> None:
+        self._mark_closed()
+        self._backend = None
+        try:
+            backend.shutdown()
+        finally:
+            # Whatever happens to the DLL, waiting callers have to be woken.
+            self._fail_in_flight()
+            self._reject_pending()
 
     def _mark_closed(self) -> None:
         with self._lock:
             self._closed = True
 
-    def _await_ready(self, backend: NativeBackend) -> None:
-        """Turn the pump once, then confirm the DLL answers a call.
+    def _await_ready(self, backend: NativeBackend, probe_hwnd: int | None) -> None:
+        """Turn the pump once and, when requested, wait for a live Java HWND."""
+        backend.pump_messages()
+        if probe_hwnd is None:
+            return
+        if self._wait_for_java_window(backend, probe_hwnd):
+            return
+        raise self._readiness_error(probe_hwnd)
 
-        What actually protects against the native access violation another
-        wrapper hit here is the ``pump_messages()`` call below, before anything
-        else touches the bridge. That is the whole mitigation, and it is why a
-        fixed pause is not used: turning the pump is the event being waited for,
-        so waiting on a clock instead would be a race dressed up as a delay.
-
-        The probe that follows cannot fail against today's DLL, and this is
-        measured rather than assumed. Disassembling the shipped 32-bit build
-        shows every export opening with ``mov ecx,[init_flag]; test ecx,ecx;
-        jz`` to a stub that does ``xor eax,eax; ret`` - so before initialization
-        each one returns FALSE cleanly instead of faulting. Calling
-        ``isJavaWindow(NULL)`` immediately after ``Windows_run`` with zero pump
-        turns returns 0 either way.
-
-        The retry loop is therefore defensive, not load-bearing: it costs one
-        call on the happy path and would absorb a fault on a JDK whose exports
-        are not guarded this way. It must not be read as evidence that a
-        not-yet-ready bridge is detectable here - it is not.
-
-        Consequently :class:`BridgeNotEnabledError` is unreachable through this
-        path today: a bridge that is merely disabled answers the probe exactly
-        like a working one. Detecting that needs a probe requiring a live JVM,
-        which this eight-call slice has no way to express. The error stays
-        because the condition is real and the hierarchy is mandated; only its
-        detection is missing.
-        """
+    def _wait_for_java_window(self, backend: NativeBackend, probe_hwnd: int) -> bool:
         deadline = time.monotonic() + self._ready_timeout
         delay = _INITIAL_PROBE_DELAY
         while True:
-            backend.pump_messages()
-            try:
-                backend.is_java_window(_NULL_HWND)
-            except OSError:
-                pass
-            else:
-                return
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(delay)
+            if _probe_java_window(backend, probe_hwnd):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(delay, remaining))
             delay = min(delay * 2, _MAX_PROBE_DELAY)
+            backend.pump_messages()
 
-        if not jab_enabled_for_current_user():
-            raise BridgeNotEnabledError(
-                "Java Access Bridge did not become ready and is not enabled for "
-                "the current user. Enable it with `%JAVA_HOME%\\bin\\jabswitch "
-                "-enable` and restart the Java application."
+    def _readiness_error(self, probe_hwnd: int) -> BridgeInitializationError:
+        if jab_enabled_for_current_user():
+            window = f"{probe_hwnd:#x}"
+            timeout = format(self._ready_timeout, "g")
+            return BridgeInitializationError(
+                "Java window "
+                + window
+                + " did not become accessible through Java Access Bridge within "
+                + timeout
+                + "s of Windows_run()"
             )
-        raise BridgeInitializationError(
-            f"Java Access Bridge did not become ready within "
-            f"{self._ready_timeout:g}s of Windows_run()"
+        return BridgeNotEnabledError(
+            "Java Access Bridge did not become ready and is not enabled for "
+            r"the current user. Enable it with `%JAVA_HOME%\bin\jabswitch "
+            "-enable` and restart the Java application."
         )
 
     def _serve(self, backend: NativeBackend) -> None:
@@ -263,17 +283,8 @@ class BridgeRuntime:
             # to keep being serviced, not only while calls are in flight.
             backend.pump_messages()
             if call is not None and call.fn is not None:
-                self._execute(call, call.fn)
+                _execute_call(call, call.fn)
             self._in_flight = None
-
-    @staticmethod
-    def _execute(call: _Call, function: Callable[[], object]) -> None:
-        try:
-            call.result = function()
-        except BaseException as exc:
-            call.error = exc
-        finally:
-            call.done.set()
 
     def _fail_in_flight(self) -> None:
         """Complete a call the worker dequeued but could not finish."""
@@ -348,6 +359,12 @@ class BridgeRuntime:
         self._live_refs += 1
         return JavaRef(self, vm_id, value)
 
+    def _unwrap_reference(self, ref: JavaRef) -> tuple[int, int]:
+        """Validate ownership and read a cookie in the serialized worker step."""
+        if not ref._belongs_to(self):
+            raise ValueError("Java reference belongs to another bridge runtime")
+        return ref.vm_id, ref.value
+
     # -- native operations -------------------------------------------------
     #
     # Each operation reads ref.vm_id/ref.value *inside* the worker closure, not
@@ -382,7 +399,7 @@ class BridgeRuntime:
         """Read a node's attributes. The result owns no reference."""
 
         def operation(backend: NativeBackend) -> ContextInfo:
-            vm_id, value = ref.vm_id, ref.value
+            vm_id, value = self._unwrap_reference(ref)
             info = backend.get_accessible_context_info(vm_id, value)
             if info is None:
                 raise NativeCallError("getAccessibleContextInfo", vmID=vm_id, ac=value)
@@ -394,7 +411,7 @@ class BridgeRuntime:
         """The child at ``index`` as a newly owned reference, or ``None``."""
 
         def operation(backend: NativeBackend) -> JavaRef | None:
-            vm_id, value = ref.vm_id, ref.value
+            vm_id, value = self._unwrap_reference(ref)
             child = backend.get_accessible_child_from_context(vm_id, value, index)
             if not child:
                 return None
@@ -406,7 +423,7 @@ class BridgeRuntime:
         """The parent as a newly owned reference, or ``None`` at the root."""
 
         def operation(backend: NativeBackend) -> JavaRef | None:
-            vm_id, value = ref.vm_id, ref.value
+            vm_id, value = self._unwrap_reference(ref)
             parent = backend.get_accessible_parent_from_context(vm_id, value)
             if not parent:
                 return None
@@ -420,11 +437,12 @@ class BridgeRuntime:
         ``None`` is the ordinary answer for any context that is not itself a
         top-level window, not a failure.
         """
-        hwnd = self._call(
-            lambda backend: backend.get_hwnd_from_accessible_context(
-                ref.vm_id, ref.value
-            )
-        )
+
+        def operation(backend: NativeBackend) -> int:
+            vm_id, value = self._unwrap_reference(ref)
+            return backend.get_hwnd_from_accessible_context(vm_id, value)
+
+        hwnd = self._call(operation)
         return hwnd or None
 
     def _release_java_object(self, vm_id: int, value: int) -> None:

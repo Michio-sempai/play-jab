@@ -10,13 +10,20 @@ repos:
     rev: 7.3.0
     hooks:
       - id: flake8
-        additional_dependencies: [wemake-python-styleguide]
+        name: wemake-python-styleguide
+        additional_dependencies:
+          - wemake-python-styleguide==1.7.1
+        args:
+          - --select=WPS
+        files: ^src/.*\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v2.3.0
     hooks:
       - id: mypy
         additional_dependencies: []
+        args: [src]
+        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

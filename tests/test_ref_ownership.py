@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -24,6 +24,32 @@ WINDOW_HWND = 0x2222
 REPEATS = 3
 DEPTH = 3
 ROOT_CHILDREN = 2
+
+
+class RecordingBackend(FakeBackend):
+    """Records native reads so foreign references cannot pass unnoticed."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.reference_reads: list[str] = []
+
+    def get_accessible_context_info(self, vm_id: int, context: int):  # type: ignore[no-untyped-def]
+        self.reference_reads.append("context_info")
+        return super().get_accessible_context_info(vm_id, context)
+
+    def get_accessible_child_from_context(
+        self, vm_id: int, context: int, index: int
+    ) -> int:
+        self.reference_reads.append("child")
+        return super().get_accessible_child_from_context(vm_id, context, index)
+
+    def get_accessible_parent_from_context(self, vm_id: int, context: int) -> int:
+        self.reference_reads.append("parent")
+        return super().get_accessible_parent_from_context(vm_id, context)
+
+    def get_hwnd_from_accessible_context(self, vm_id: int, context: int) -> int:
+        self.reference_reads.append("hwnd")
+        return super().get_hwnd_from_accessible_context(vm_id, context)
 
 
 def released_after_collect(backend: FakeBackend, cookie: int) -> bool:
@@ -147,6 +173,41 @@ def test_a_closed_reference_cannot_be_used_again(
         bridge.parent(root)
     with pytest.raises(JavaReferenceClosedError):
         bridge.hwnd_from_context(root)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda bridge, ref: bridge.context_info(ref),
+        lambda bridge, ref: bridge.child(ref, 0),
+        lambda bridge, ref: bridge.parent(ref),
+        lambda bridge, ref: bridge.hwnd_from_context(ref),
+    ],
+)
+def test_a_reference_from_another_runtime_is_rejected_before_native_use(
+    operation: Callable[[BridgeRuntime, object], object],
+) -> None:
+    backend_a, factory_a = fake_backend_factory({WINDOW_HWND: nested_tree()})
+    backend_b = RecordingBackend({WINDOW_HWND: nested_tree()}, vm_id=backend_a.vm_id)
+
+    def factory_b() -> FakeBackend:
+        return backend_b
+
+    bridge_a = BridgeRuntime(factory_a, pump_interval=0.001)
+    bridge_b = BridgeRuntime(factory_b, pump_interval=0.001)
+    bridge_a.start()
+    bridge_b.start()
+    try:
+        ref = bridge_a.context_from_hwnd(WINDOW_HWND)
+        with pytest.raises(ValueError, match="belongs to another bridge runtime"):
+            operation(bridge_b, ref)
+        assert backend_b.reference_reads == []
+        assert not ref.closed
+        assert bridge_a.context_info(ref).name == "Frame"
+        ref.close()
+    finally:
+        bridge_b.close()
+        bridge_a.close()
 
 
 def test_a_dropped_reference_is_released_by_the_finalizer(

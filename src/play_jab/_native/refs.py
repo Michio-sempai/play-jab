@@ -44,14 +44,22 @@ class JavaRef:
     dropped without closing; correctness never depends on the garbage collector.
     """
 
-    __slots__ = ("__weakref__", "_finalizer", "_value", "_vm_id")
+    __slots__ = ("__weakref__", "_finalizer", "_owner", "_value", "_vm_id")
 
     def __init__(self, releaser: ReferenceReleaser, vm_id: int, value: int) -> None:
+        # Runtime identity is part of the reference's safety boundary. Cookies
+        # are meaningful only to the backend instance that minted them; handing
+        # one to another runtime is undefined native behaviour.
+        self._owner = releaser
         self._vm_id = vm_id
         self._value = value
         # finalize() is one-shot, which is what makes close() idempotent: calling
         # it twice releases exactly once.
         self._finalizer = weakref.finalize(self, _release, releaser, vm_id, value)
+
+    def _belongs_to(self, owner: object) -> bool:
+        """Whether ``owner`` is the runtime that minted this reference."""
+        return self._owner is owner
 
     @property
     def vm_id(self) -> int:

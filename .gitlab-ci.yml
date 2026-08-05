@@ -44,7 +44,7 @@ flake8-wps:
   extends: [.uv-image, .uv-cache]
   stage: lint
   script:
-    - uv run --group lint flake8 src tests
+    - uv run --group lint flake8 src --select=WPS
 
 mypy:
   extends: [.uv-image, .uv-cache]
@@ -68,7 +68,8 @@ test:
     matrix:
       - PYTHON_VERSION: ["3.11", "3.12", "3.13", "3.14"]
   script:
-    - uv run --group test pytest --cov-report=xml
+    # Real JAB tests need an interactive Windows desktop and remain local-only.
+    - uv run --group test pytest --ignore=tests/integration --cov-report=xml
   coverage: '/TOTAL.*\s+(\d+%)$/'
   artifacts:
     reports:

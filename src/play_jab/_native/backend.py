@@ -16,10 +16,10 @@ from the single thread that created the backend.
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -29,7 +29,7 @@ from play_jab._native.functions import REQUIRED_EXPORTS, configure_functions
 from play_jab._native.types import AccessibleContext, AccessibleContextInfo
 
 if sys.platform == "win32":
-    from ctypes import wintypes
+    from ctypes import wintypes as win_types
 
 __all__ = ["ContextInfo", "DllBackend", "NativeBackend", "dll_backend_factory"]
 
@@ -37,6 +37,15 @@ _PM_REMOVE = 0x0001
 # Upper bound on messages dispatched per pump call, so that a message storm
 # cannot starve the runtime's command queue.
 _MAX_MESSAGES_PER_PUMP = 64
+
+
+def _free_library(dll: ctypes.CDLL) -> None:
+    """Release one loader reference without letting cleanup errors escape."""
+    with suppress(BaseException):  # cleanup must preserve the original error
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.FreeLibrary.argtypes = [win_types.HMODULE]
+        kernel32.FreeLibrary.restype = win_types.BOOL
+        kernel32.FreeLibrary(dll._handle)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,36 +144,35 @@ class DllBackend:
         self._dll = dll
         self._closed = False
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
-        # kernel32/user32 are stdcall, hence WinDLL - unlike the Access Bridge
-        # itself, which is cdecl. See dll.load_access_bridge.
-        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._message = wintypes.MSG()
+        self._message = win_types.MSG()
         self._configure_win32()
 
     @classmethod
     def load(cls, dll_path: str | Path | None = None) -> DllBackend:
         """Locate, load and configure the Access Bridge DLL."""
         dll = load_access_bridge(dll_path)
-        verify_exports(dll, REQUIRED_EXPORTS)
-        configure_functions(dll)
-        return cls(dll)
+        try:
+            verify_exports(dll, REQUIRED_EXPORTS)
+            configure_functions(dll)
+            return cls(dll)
+        except BaseException:
+            _free_library(dll)
+            raise
 
     def _configure_win32(self) -> None:
-        message_pointer = ctypes.POINTER(wintypes.MSG)
+        message_pointer = ctypes.POINTER(win_types.MSG)
         self._user32.PeekMessageW.argtypes = [
             message_pointer,
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.UINT,
-            wintypes.UINT,
+            win_types.HWND,
+            win_types.UINT,
+            win_types.UINT,
+            win_types.UINT,
         ]
-        self._user32.PeekMessageW.restype = wintypes.BOOL
+        self._user32.PeekMessageW.restype = win_types.BOOL
         self._user32.TranslateMessage.argtypes = [message_pointer]
-        self._user32.TranslateMessage.restype = wintypes.BOOL
+        self._user32.TranslateMessage.restype = win_types.BOOL
         self._user32.DispatchMessageW.argtypes = [message_pointer]
         self._user32.DispatchMessageW.restype = ctypes.c_ssize_t
-        self._kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
-        self._kernel32.FreeLibrary.restype = wintypes.BOOL
 
     def windows_run(self) -> None:
         self._dll.Windows_run()
@@ -249,8 +257,7 @@ class DllBackend:
         if self._closed:
             return
         self._closed = True
-        with contextlib.suppress(OSError):  # pragma: no cover - rarely fails
-            self._kernel32.FreeLibrary(self._dll._handle)
+        _free_library(self._dll)
 
 
 def dll_backend_factory(

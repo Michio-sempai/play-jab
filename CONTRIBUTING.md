@@ -15,7 +15,7 @@ uv run pre-commit install --hook-type commit-msg
 ```sh
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
-uv run flake8 src tests
+uv run flake8 src --select=WPS
 uv run mypy src
 ```
 

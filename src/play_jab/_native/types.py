@@ -62,12 +62,12 @@ AccessibleContext = JOBJECT64
 JavaObject = JOBJECT64
 
 if sys.platform == "win32":
-    from ctypes import wintypes
+    from ctypes import wintypes as win_types
 
     # wintypes.HWND is ctypes.c_void_p, i.e. pointer-sized, which is what an
     # HWND actually is. Modelling it as c_long would truncate in a 64-bit
     # process.
-    HWND = wintypes.HWND
+    HWND = win_types.HWND
 else:  # pragma: no cover - import shim so fake-backend tests run off-Windows
     # ctypes.wintypes does not import on non-Windows platforms. The real DLL is
     # unreachable there anyway; this keeps the module importable for unit tests

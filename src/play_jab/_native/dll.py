@@ -29,6 +29,7 @@ DLL_NAME_64 = "WindowsAccessBridge-64.dll"
 
 _BITNESS_64 = 64
 _BITNESS_32 = 32
+_MAX_32_BIT_INTEGER = (1 << _BITNESS_32) - 1
 
 _ACCESSIBILITY_PROPERTIES = ".accessibility.properties"
 _ASSISTIVE_TECHNOLOGIES_KEY = "assistive_technologies"
@@ -41,7 +42,7 @@ def process_bitness() -> int:
     A 32-bit CPython on 64-bit Windows must load the 32-bit bridge: the DLL is
     loaded into this process, so the OS bitness is irrelevant.
     """
-    return _BITNESS_64 if sys.maxsize > 2**32 else _BITNESS_32
+    return _BITNESS_64 if sys.maxsize > _MAX_32_BIT_INTEGER else _BITNESS_32
 
 
 def _dll_file_name() -> str:
@@ -65,25 +66,27 @@ def _search_directories() -> Iterator[Path]:
         yield Path(system_root) / "System32"
 
 
+def _resolve_explicit_path(dll_path: str | os.PathLike[str]) -> Path:
+    explicit = Path(dll_path)
+    if not explicit.is_file():
+        raise BridgeInitializationError(
+            f"Access Bridge DLL not found at the given path: {explicit}"
+        )
+    return explicit.resolve()
+
+
 def find_access_bridge_dll(dll_path: str | os.PathLike[str] | None = None) -> Path:
     """Resolve an absolute path to the Access Bridge DLL for this process."""
     if dll_path is not None:
-        explicit = Path(dll_path)
-        if not explicit.is_file():
-            raise BridgeInitializationError(
-                f"Access Bridge DLL not found at the given path: {explicit}"
-            )
-        return explicit.resolve()
+        return _resolve_explicit_path(dll_path)
 
     file_name = _dll_file_name()
-    searched: list[Path] = []
-    for directory in _search_directories():
-        candidate = directory / file_name
-        searched.append(candidate)
+    candidates = [directory / file_name for directory in _search_directories()]
+    for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
 
-    locations = ", ".join(str(path) for path in searched) or "<no candidates>"
+    locations = ", ".join(str(path) for path in candidates) or "<no candidates>"
     raise BridgeInitializationError(
         f"{file_name} not found for this {process_bitness()}-bit process. "
         f"Looked in: {locations}. Install a JDK/JRE with Java Access Bridge or "
@@ -141,15 +144,26 @@ def verify_exports(dll: ctypes.CDLL, exports: Iterable[str]) -> None:
     """Fail fast if the loaded DLL is missing any required export."""
     missing = [name for name in exports if not hasattr(dll, name)]
     if missing:
+        missing_names = ", ".join(missing)
         raise BridgeInitializationError(
-            f"Access Bridge DLL is missing required export(s): "
-            f"{', '.join(missing)}. The loaded library is not a compatible "
-            f"WindowsAccessBridge build."
+            f"Access Bridge DLL is missing required export(s): {missing_names}. "
+            "The loaded library is not a compatible "
+            "WindowsAccessBridge build."
         )
 
 
+def _access_bridge_setting(line: str) -> bool | None:
+    stripped = line.strip()
+    if stripped.startswith(("#", "!")):
+        return None
+    key, separator, configured = stripped.partition("=")
+    if separator and key.strip() == _ASSISTIVE_TECHNOLOGIES_KEY:
+        return _ACCESS_BRIDGE_TECHNOLOGY in configured
+    return None
+
+
 def jab_enabled_for_current_user() -> bool:
-    """Report whether the user's Java accessibility properties enable JAB.
+    r"""Report whether the user's Java accessibility properties enable JAB.
 
     ``jabswitch -enable`` writes ``assistive_technologies=...AccessBridge`` into
     ``%USERPROFILE%\\.accessibility.properties``. Used only to turn a failed
@@ -163,10 +177,7 @@ def jab_enabled_for_current_user() -> bool:
         return False
 
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("#", "!")):
-            continue
-        key, separator, value = stripped.partition("=")
-        if separator and key.strip() == _ASSISTIVE_TECHNOLOGIES_KEY:
-            return _ACCESS_BRIDGE_TECHNOLOGY in value
+        enabled = _access_bridge_setting(line)
+        if enabled is not None:
+            return enabled
     return False

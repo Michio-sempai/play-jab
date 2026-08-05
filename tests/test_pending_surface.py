@@ -38,8 +38,8 @@ def test_the_native_backend_registers_no_callbacks() -> None:
 def test_the_bridge_runtime_offers_no_waiting_primitive() -> None:
     """The one existing timeout is not auto-wait and does not satisfy the concept.
 
-    ``ready_timeout`` bounds startup only. It does not re-evaluate a condition,
-    so it is not the polling-plus-event auto-wait CONCEPT.MD asks for; there is
+    ``ready_timeout`` bounds startup readiness for a supplied HWND. It is not
+    the element-level polling-plus-event auto-wait CONCEPT.MD asks for; there is
     still no API to test for that.
     """
     offenders = [
