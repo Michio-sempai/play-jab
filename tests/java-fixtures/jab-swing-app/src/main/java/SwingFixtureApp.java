@@ -20,14 +20,18 @@ import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
 import javax.swing.JScrollPane;
+import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.JTree;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.WindowConstants;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.DefaultTreeModel;
 
 /**
  * Общая Swing fixture для интеграционных тестов {@code play-jab}: покрывает
@@ -272,6 +276,7 @@ public final class SwingFixtureApp {
 
     private int dynamicItemsAdded;
     private boolean autoNodeAttached;
+    private int replaceGeneration;
 
     public static void main(String[] args) {
         boolean secondWindow = Arrays.asList(args).contains("--second-window")
@@ -313,11 +318,182 @@ public final class SwingFixtureApp {
         tabs.addTab("Table", buildTableTab());
         tabs.addTab("Dynamic", buildDynamicTab());
         tabs.addTab("Locator", buildLocatorTab());
+        tabs.addTab("Workloads", buildWorkloadsTab());
         nameTabPage(tabs, 0, "fixture.tab_form_page");
         nameTabPage(tabs, 1, "fixture.tab_table_page");
         nameTabPage(tabs, 2, "fixture.tab_dynamic_page");
         nameTabPage(tabs, 3, "fixture.tab_locator_page");
+        nameTabPage(tabs, 4, "fixture.tab_workloads_page");
         return tabs;
+    }
+
+    JPanel buildWorkloadsTab() {
+        DefaultListModel<String> listModel = new DefaultListModel<>();
+        for (int index = 0; index < 1000; index++) {
+            listModel.addElement(String.format("fixture.virtual_list_item_%04d", index));
+        }
+        JList<String> list = new JList<>(listModel);
+        list.setVisibleRowCount(8);
+        list.getAccessibleContext().setAccessibleName("fixture.virtual_list");
+        JScrollPane listScroll = new JScrollPane(list);
+        listScroll.getAccessibleContext().setAccessibleName("fixture.virtual_list_scroll");
+        listScroll.getVerticalScrollBar().getAccessibleContext()
+                .setAccessibleName("fixture.virtual_list_scrollbar_vertical");
+        JLabel listStatus = new JLabel();
+        listStatus.getAccessibleContext().setAccessibleName("fixture.virtual_list_status");
+        Runnable updateListStatus = () -> setLabelText(
+                listStatus,
+                "first=" + list.getFirstVisibleIndex() + " last=" + list.getLastVisibleIndex());
+        list.addListSelectionListener(event -> updateListStatus.run());
+        listScroll.getVerticalScrollBar().addAdjustmentListener(event -> updateListStatus.run());
+        JPanel listButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        listButtons.add(workloadButton("Start", "fixture.virtual_list_start_button", () -> {
+            list.ensureIndexIsVisible(0);
+            list.setSelectedIndex(0);
+            updateListStatus.run();
+        }));
+        listButtons.add(workloadButton("500", "fixture.virtual_list_500_button", () -> {
+            list.ensureIndexIsVisible(500);
+            list.setSelectedIndex(500);
+            updateListStatus.run();
+        }));
+        listButtons.add(workloadButton("End", "fixture.virtual_list_end_button", () -> {
+            list.ensureIndexIsVisible(999);
+            list.setSelectedIndex(999);
+            updateListStatus.run();
+        }));
+        listButtons.add(listStatus);
+        JPanel listPanel = new JPanel(new BorderLayout());
+        listPanel.add(listScroll, BorderLayout.CENTER);
+        listPanel.add(listButtons, BorderLayout.SOUTH);
+
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode("fixture.virtual_tree_root");
+        for (int group = 0; group < 40; group++) {
+            DefaultMutableTreeNode groupNode = new DefaultMutableTreeNode(
+                    String.format("fixture.virtual_tree_group_%02d", group));
+            for (int item = 0; item < 5; item++) {
+                groupNode.add(new DefaultMutableTreeNode(String.format(
+                        "fixture.virtual_tree_group_%02d_item_%02d", group, item)));
+            }
+            root.add(groupNode);
+        }
+        JTree tree = new JTree(new DefaultTreeModel(root));
+        tree.setVisibleRowCount(8);
+        tree.getAccessibleContext().setAccessibleName("fixture.virtual_tree");
+        JScrollPane treeScroll = new JScrollPane(tree);
+        treeScroll.getAccessibleContext().setAccessibleName("fixture.virtual_tree_scroll");
+        JLabel treeStatus = new JLabel();
+        treeStatus.getAccessibleContext().setAccessibleName("fixture.virtual_tree_status");
+        Runnable updateTreeStatus = () -> setLabelText(treeStatus,
+                "expanded=" + expandedRowCount(tree)
+                        + " selected=" + tree.getLeadSelectionRow()
+                        + " first=" + tree.getClosestRowForLocation(0, 0)
+                        + " last=" + tree.getClosestRowForLocation(0, tree.getHeight() - 1));
+        JPanel treeButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        treeButtons.add(workloadButton("Expand", "fixture.virtual_tree_expand_button", () -> {
+            for (int row = 0; row < tree.getRowCount(); row++) {
+                tree.expandRow(row);
+            }
+            updateTreeStatus.run();
+        }));
+        treeButtons.add(workloadButton("Collapse", "fixture.virtual_tree_collapse_button", () -> {
+            for (int row = tree.getRowCount() - 1; row > 0; row--) {
+                tree.collapseRow(row);
+            }
+            updateTreeStatus.run();
+        }));
+        treeButtons.add(workloadButton("Show end", "fixture.virtual_tree_show_button", () -> {
+            int row = tree.getRowCount() - 1;
+            tree.setSelectionRow(row);
+            tree.scrollRowToVisible(row);
+            updateTreeStatus.run();
+        }));
+        treeButtons.add(workloadButton("Reset", "fixture.virtual_tree_reset_button", () -> {
+            tree.clearSelection();
+            tree.scrollRowToVisible(0);
+            updateTreeStatus.run();
+        }));
+        treeButtons.add(treeStatus);
+        JPanel treePanel = new JPanel(new BorderLayout());
+        treePanel.add(treeScroll, BorderLayout.CENTER);
+        treePanel.add(treeButtons, BorderLayout.SOUTH);
+
+        JPanel dynamicHost = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        dynamicHost.getAccessibleContext().setAccessibleName("fixture.workload_dynamic_host");
+        dynamicHost.add(workloadDynamicNode());
+        JPanel dynamicButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        dynamicButtons.add(workloadButton("Attach", "fixture.workload_attach_button", () -> {
+            if (dynamicHost.getComponentCount() == 0) {
+                dynamicHost.add(workloadDynamicNode());
+                refresh(dynamicHost);
+            }
+        }));
+        dynamicButtons.add(workloadButton("Detach", "fixture.workload_detach_button", () -> {
+            dynamicHost.removeAll();
+            refresh(dynamicHost);
+        }));
+        dynamicButtons.add(workloadButton("Show/hide", "fixture.workload_visibility_button", () -> {
+            if (dynamicHost.getComponentCount() > 0) {
+                Component node = dynamicHost.getComponent(0);
+                node.setVisible(!node.isVisible());
+                refresh(dynamicHost);
+            }
+        }));
+        dynamicButtons.add(workloadButton("Enable/disable", "fixture.workload_enabled_button", () -> {
+            if (dynamicHost.getComponentCount() > 0) {
+                Component node = dynamicHost.getComponent(0);
+                node.setEnabled(!node.isEnabled());
+            }
+        }));
+        dynamicButtons.add(workloadButton("Replace", "fixture.workload_replace_button", () -> {
+            dynamicHost.removeAll();
+            dynamicHost.add(workloadDynamicNode());
+            refresh(dynamicHost);
+        }));
+        JPanel dynamicPanel = new JPanel(new BorderLayout());
+        dynamicPanel.add(dynamicHost, BorderLayout.CENTER);
+        dynamicPanel.add(dynamicButtons, BorderLayout.SOUTH);
+
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, listPanel, treePanel);
+        split.setResizeWeight(0.5);
+        JPanel panel = new JPanel(new BorderLayout(0, 8));
+        panel.getAccessibleContext().setAccessibleName("fixture.tab_workloads");
+        panel.add(split, BorderLayout.CENTER);
+        panel.add(dynamicPanel, BorderLayout.SOUTH);
+        updateListStatus.run();
+        updateTreeStatus.run();
+        return panel;
+    }
+
+    private JButton workloadButton(String text, String name, Runnable action) {
+        JButton button = new JButton(text);
+        button.getAccessibleContext().setAccessibleName(name);
+        button.addActionListener(event -> action.run());
+        return button;
+    }
+
+    private JLabel workloadDynamicNode() {
+        replaceGeneration++;
+        JLabel node = new JLabel("generation=" + replaceGeneration);
+        node.getAccessibleContext().setAccessibleName("fixture.workload_dynamic_node");
+        node.getAccessibleContext().setAccessibleDescription(
+                "generation=" + replaceGeneration);
+        return node;
+    }
+
+    private static void refresh(JPanel panel) {
+        panel.revalidate();
+        panel.repaint();
+    }
+
+    private static int expandedRowCount(JTree tree) {
+        int expanded = 0;
+        for (int row = 0; row < tree.getRowCount(); row++) {
+            if (tree.isExpanded(row)) {
+                expanded++;
+            }
+        }
+        return expanded;
     }
 
     /**
@@ -480,8 +656,37 @@ public final class SwingFixtureApp {
 
         JButton resetTable = new JButton("Reset row 7");
         resetTable.getAccessibleContext().setAccessibleName("fixture.reset_table_button");
-        resetTable.addActionListener(
-                e -> tableModel.setValueAt("Processing", MUTABLE_ROW, STATUS_COLUMN));
+        resetTable.addActionListener(e -> {
+            tableModel.setValueAt("Processing", MUTABLE_ROW, STATUS_COLUMN);
+            while (tableModel.getRowCount() > ROW_COUNT) {
+                tableModel.removeRow(tableModel.getRowCount() - 1);
+            }
+            updateTableRowCount();
+        });
+
+        JButton addExtraRow = new JButton("Add extra row");
+        addExtraRow.getAccessibleContext().setAccessibleName("fixture.table_add_row_button");
+        addExtraRow.addActionListener(e -> {
+            if (tableModel.getRowCount() == ROW_COUNT) {
+                tableModel.addRow(new Object[] {"100", "job-100", "alice", "Queued", "100%"});
+            }
+            updateTableRowCount();
+        });
+
+        JButton removeExtraRow = new JButton("Remove extra row");
+        removeExtraRow.getAccessibleContext().setAccessibleName("fixture.table_remove_row_button");
+        removeExtraRow.addActionListener(e -> {
+            if (tableModel.getRowCount() > ROW_COUNT) {
+                tableModel.removeRow(tableModel.getRowCount() - 1);
+            }
+            updateTableRowCount();
+        });
+
+        JLabel rowCountStatus = new JLabel();
+        rowCountStatus.getAccessibleContext().setAccessibleName("fixture.table_row_count_status");
+        tableModel.addTableModelListener(event -> setLabelText(
+                rowCountStatus, "rows=" + tableModel.getRowCount()));
+        setLabelText(rowCountStatus, "rows=" + tableModel.getRowCount());
 
         JButton selectRow = new JButton("Select row 7");
         selectRow.getAccessibleContext().setAccessibleName("fixture.select_row_button");
@@ -527,6 +732,9 @@ public final class SwingFixtureApp {
         buttons.add(selectColumn);
         buttons.add(selectFew);
         buttons.add(clearSelection);
+        buttons.add(addExtraRow);
+        buttons.add(removeExtraRow);
+        buttons.add(rowCountStatus);
 
         setMixedSelectionMode();
 
@@ -552,6 +760,11 @@ public final class SwingFixtureApp {
     private void setMixedSelectionMode() {
         table.setRowSelectionAllowed(true);
         table.setColumnSelectionAllowed(true);
+    }
+
+    private void updateTableRowCount() {
+        table.revalidate();
+        table.repaint();
     }
 
     JPanel buildDynamicTab() {
@@ -653,7 +866,10 @@ public final class SwingFixtureApp {
      */
     void startAutoNodeCycle() {
         stopAutoNodeCycle();
-        autoNodeTimer = new Timer(1500, event -> {
+        // Keep a wide detached observation window: the workloads tab adds
+        // virtualized trees whose native traversal can take longer than a
+        // single short Swing timer interval on slower JAB installations.
+        autoNodeTimer = new Timer(3000, event -> {
             if (autoNodeAttached) {
                 autoPanel.remove(autoNode);
             } else {
@@ -663,7 +879,7 @@ public final class SwingFixtureApp {
             autoPanel.revalidate();
             autoPanel.repaint();
         });
-        autoNodeTimer.setInitialDelay(1500);
+        autoNodeTimer.setInitialDelay(1000);
         autoNodeTimer.start();
     }
 

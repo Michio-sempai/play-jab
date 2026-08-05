@@ -48,10 +48,11 @@ public final class FixtureLauncher {
             case "swing" -> SwingFixtureApp.main(
                     java.util.Arrays.copyOfRange(args, 1, args.length));
             case "dialog" -> JabDialogRepro.main(new String[0]);
+            case "lifecycle" -> LifecycleFixtureApp.main(new String[0]);
             default -> {
                 error.println(
                         "Unknown fixture mode: " + mode
-                                + " (expected 'swing' or 'dialog')");
+                                + " (expected 'swing', 'dialog', or 'lifecycle')");
                 return 2;
             }
         }

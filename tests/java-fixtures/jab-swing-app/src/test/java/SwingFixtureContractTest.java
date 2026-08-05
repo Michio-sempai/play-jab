@@ -27,6 +27,7 @@ import javax.swing.JPasswordField;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.JTree;
 import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.Test;
 
@@ -39,12 +40,13 @@ final class SwingFixtureContractTest {
             JTabbedPane tabs = new SwingFixtureApp().buildTabs();
 
             assertEquals("fixture.tabs", accessibleName(tabs));
-            assertEquals(4, tabs.getTabCount());
+            assertEquals(5, tabs.getTabCount());
             assertEquals(0, tabs.getSelectedIndex());
             assertEquals("Form", tabs.getTitleAt(0));
             assertEquals("Table", tabs.getTitleAt(1));
             assertEquals("Dynamic", tabs.getTitleAt(2));
             assertEquals("Locator", tabs.getTitleAt(3));
+            assertEquals("Workloads", tabs.getTitleAt(4));
             assertEquals(
                     "fixture.tab_form_page",
                     tabs.getAccessibleContext()
@@ -69,6 +71,36 @@ final class SwingFixtureContractTest {
                             .getAccessibleChild(3)
                             .getAccessibleContext()
                             .getAccessibleName());
+            assertEquals(
+                    "fixture.tab_workloads_page",
+                    tabs.getAccessibleContext()
+                            .getAccessibleChild(4)
+                            .getAccessibleContext()
+                            .getAccessibleName());
+            return null;
+        });
+    }
+
+    @Test
+    void workloadModelsAndDeterministicControlsAreStable() throws Exception {
+        onEdt(() -> {
+            JPanel workloads = new SwingFixtureApp().buildWorkloadsTab();
+            JList<?> list = find(workloads, "fixture.virtual_list", JList.class);
+            JTree tree = find(workloads, "fixture.virtual_tree", JTree.class);
+            assertEquals(1000, list.getModel().getSize());
+            assertEquals("fixture.virtual_list_item_0000", list.getModel().getElementAt(0));
+            assertEquals("fixture.virtual_list_item_0999", list.getModel().getElementAt(999));
+            assertEquals(40, ((javax.swing.tree.TreeNode) tree.getModel().getRoot()).getChildCount());
+
+            JPanel host = find(workloads, "fixture.workload_dynamic_host", JPanel.class);
+            assertEquals(1, host.getComponentCount());
+            assertEquals("generation=1", accessibleDescription(host.getComponent(0)));
+            find(workloads, "fixture.workload_replace_button", JButton.class).doClick();
+            assertEquals("generation=2", accessibleDescription(host.getComponent(0)));
+            find(workloads, "fixture.workload_detach_button", JButton.class).doClick();
+            assertEquals(0, host.getComponentCount());
+            find(workloads, "fixture.workload_attach_button", JButton.class).doClick();
+            assertEquals(1, host.getComponentCount());
             return null;
         });
     }
