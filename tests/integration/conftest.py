@@ -404,6 +404,26 @@ def dialog_first_fixture(
                     close_raw_window(hwnd)
 
 
+@pytest.fixture
+def lifecycle_fixture(
+    java_fixture_build: JavaFixtureBuild,
+) -> Iterator[DialogFixture]:
+    """Start a fresh JVM that publishes shutdown state and exits once."""
+    with _running_jvm(
+        java_fixture_build,
+        "lifecycle",
+        _fixture_command(java_fixture_build, "lifecycle"),
+    ) as launched:
+        process, stdout_log, stderr_log = launched
+        hwnd = wait_for_raw_window(
+            process,
+            "JAB lifecycle fixture",
+            stdout_log,
+            stderr_log,
+        )
+        yield DialogFixture(hwnd, process, stdout_log, stderr_log)
+
+
 @pytest.fixture(scope="session")
 def swing_fixture_with_second_window(
     jab_dll_path: Path,

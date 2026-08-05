@@ -310,13 +310,17 @@ def test_table_snapshot_headers_indices_and_selection_reads(
     table.select_row(0)
     assert table.selected_rows() == (0,)
 
-    for row, column in ((-1, 0), (0, -1), (2, 0), (0, 2)):
+    for row, column in ((-1, 0), (0, -1)):
         with pytest.raises(TableIndexError):
             table.cell(row, column)
     with pytest.raises(TableIndexError):
-        table.row_header(2)
+        table.cell(2, 0).text_content()
     with pytest.raises(TableIndexError):
-        table.column_header(2)
+        table.cell(0, 2).text_content()
+    with pytest.raises(TableIndexError):
+        table.row_header(2).text_content()
+    with pytest.raises(TableIndexError):
+        table.column_header(2).text_content()
     with pytest.raises(TableIndexError):
         table.select_row(2)
 

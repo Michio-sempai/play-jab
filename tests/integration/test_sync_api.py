@@ -6,10 +6,15 @@ import re
 
 import pytest
 
-from play_jab.exceptions import JavaWindowAmbiguousError, StrictModeViolation
+from play_jab.exceptions import (
+    JavaProcessExitedError,
+    JavaVmExitedError,
+    JavaWindowAmbiguousError,
+    StrictModeViolation,
+)
 from play_jab.sync_api import PlayJab, contains
 
-from .conftest import SwingFixture
+from .conftest import DialogFixture, SwingFixture
 
 pytestmark = pytest.mark.integration_jab
 
@@ -21,6 +26,20 @@ _TRAVERSAL_REPETITIONS = 5
 _DUPLICATE_COUNT = 2
 _TABLE_ROWS = 100
 _TABLE_COLUMNS = 5
+
+
+def test_graceful_jvm_exit_wakes_locator_wait(
+    lifecycle_fixture: DialogFixture,
+) -> None:
+    with PlayJab(timeout=_API_TIMEOUT_MS) as api:
+        window = api.attach(pid=lifecycle_fixture.process.pid).window(
+            hwnd=lifecycle_fixture.hwnd
+        )
+        assert window.get_by_name("fixture.shutdown_status").text_content()
+        with pytest.raises((JavaVmExitedError, JavaProcessExitedError)):
+            window.get_by_name("never-attached").wait_for(
+                "attached", timeout=_API_TIMEOUT_MS
+            )
 
 
 def test_attach_by_hwnd_pid_and_exact_title(swing_fixture: SwingFixture) -> None:
@@ -112,13 +131,18 @@ def test_locator_chaining_strictness_states_and_unicode(
 def test_polling_observes_automatic_attachment_cycle(
     swing_fixture: SwingFixture,
 ) -> None:
-    """A lazy locator re-resolves the tree while its Swing node comes and goes."""
+    """A lazy locator re-resolves a deterministically attached Swing node."""
     with PlayJab(timeout=_API_TIMEOUT_MS) as api:
         window = api.attach(pid=swing_fixture.process.pid).window(title=_TITLE)
-        node = window.get_by_name("fixture.auto_node")
-        node.wait_for("attached", timeout=_DYNAMIC_TIMEOUT_MS)
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(4)
+        node = window.get_by_name("fixture.workload_dynamic_node")
+        window.get_by_name("fixture.workload_detach_button").click()
         node.wait_for("detached", timeout=_DYNAMIC_TIMEOUT_MS)
         assert node.count() == 0
+        window.get_by_name("fixture.workload_attach_button").click()
+        node.wait_for("attached", timeout=_DYNAMIC_TIMEOUT_MS)
+        tabs.select_option(0)
         assert api.live_ref_count == 0
 
 
@@ -167,9 +191,41 @@ def test_forms_and_table_api_round_trip_through_real_jab(
             table.cell(7, 3).wait_for_text("Done")
             window.get_by_name("fixture.reset_table_button").click()
             table.cell(7, 3).wait_for_text("Processing")
+            window.get_by_name("fixture.table_add_row_button").click()
+            assert table.row_count() == _TABLE_ROWS + 1
+            assert table.cell(_TABLE_ROWS, 1).text_content() == "job-100"
+            window.get_by_name("fixture.table_remove_row_button").click()
+            assert table.row_count() == _TABLE_ROWS
             assert api.live_ref_count == 0
         finally:
             tabs.select_option(0)
             username.clear()
             password.clear()
             remember.uncheck()
+
+
+def test_virtualized_workloads_and_replacement_use_lazy_locators(
+    swing_fixture: SwingFixture,
+) -> None:
+    with PlayJab(timeout=10_000) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(4)
+        try:
+            item = window.get_by_name("fixture.virtual_list_item_0500")
+            window.get_by_name("fixture.virtual_list_500_button").click()
+            item.wait_for("attached")
+            assert item.snapshot().name == "fixture.virtual_list_item_0500"
+
+            dynamic = window.get_by_name("fixture.workload_dynamic_node")
+            before = dynamic.snapshot().description
+            window.get_by_name("fixture.workload_replace_button").click()
+            dynamic.wait_for("attached")
+            assert dynamic.snapshot().description != before
+
+            window.get_by_name("fixture.virtual_tree_expand_button").click()
+            assert window.get_by_name("fixture.virtual_tree_group_00").count() <= 1
+            assert api.live_ref_count == 0
+        finally:
+            window.get_by_name("fixture.virtual_list_start_button").click()
+            tabs.select_option(0)
