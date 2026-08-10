@@ -1,3 +1,9 @@
+## v2026.08.7 (2026-08-10)
+
+### Fix
+
+- resolve expect_window() ambiguity from JAB semantics, not raw HWND count
+
 ## v2026.08.6 (2026-08-10)
 
 ### Feat
