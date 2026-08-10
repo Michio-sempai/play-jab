@@ -24,6 +24,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+play-jab-skill = "play_jab._skill.cli:main"
+
 [project.urls]
 Homepage = "https://gitlab.com/dashanovsd/play-jab"
 Repository = "https://gitlab.com/dashanovsd/play-jab"

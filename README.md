@@ -134,6 +134,20 @@ calling thread's DPI-awareness context after the click.
 See the **[Getting Started guide](docs/getting-started.md)** for environment
 checks, JAB setup, currently available imports, and troubleshooting.
 
+## Claude Code skill
+
+Installing `play-jab` also installs a `play-jab-skill` console script that
+copies a bundled [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
+into your project so Claude picks up play-jab's API, constraints, and
+exceptions automatically:
+
+```powershell
+python -m pip install play-jab
+play-jab-skill            # writes .claude/skills/play-jab in the current project
+play-jab-skill --user     # writes ~/.claude/skills/play-jab instead, for every project
+play-jab-skill --force    # overwrite an existing installation
+```
+
 ## Documentation
 
 - [Getting Started](docs/getting-started.md)
