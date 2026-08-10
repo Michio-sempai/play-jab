@@ -2,6 +2,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -160,6 +161,10 @@ final class SwingFixtureContractTest {
 
             assertEquals(100, accessibleTable.getAccessibleRowCount());
             assertEquals(5, accessibleTable.getAccessibleColumnCount());
+            assertEquals(10, SwingFixtureApp.VISIBLE_ROW_COUNT);
+            assertEquals(
+                    table.getRowHeight() * SwingFixtureApp.VISIBLE_ROW_COUNT,
+                    table.getPreferredScrollableViewportSize().height);
             AccessibleTable columnHeader = accessibleTable.getAccessibleColumnHeader();
             assertEquals(1, columnHeader.getAccessibleRowCount());
             assertEquals(5, columnHeader.getAccessibleColumnCount());
@@ -198,6 +203,19 @@ final class SwingFixtureContractTest {
             assertArrayEquals(new int[] {3}, table.getSelectedColumns());
             find(tab, "fixture.clear_selection_button", JButton.class).doClick();
             assertArrayEquals(new int[0], table.getSelectedRows());
+
+            JButton addRow = find(tab, "fixture.table_add_row_button", JButton.class);
+            JButton removeRow = find(tab, "fixture.table_remove_row_button", JButton.class);
+            assertEquals(100, table.getRowCount());
+            addRow.doClick();
+            assertEquals(101, table.getRowCount());
+            assertEquals("job-100", table.getValueAt(100, 1));
+            addRow.doClick(); // repeated click is a no-op, not a second extra row
+            assertEquals(101, table.getRowCount());
+            removeRow.doClick();
+            assertEquals(100, table.getRowCount());
+            removeRow.doClick(); // repeated click is a no-op below the base row count
+            assertEquals(100, table.getRowCount());
             return null;
         });
     }
@@ -211,7 +229,7 @@ final class SwingFixtureContractTest {
 
             assertEquals("fixture.synthetic_table", context.getAccessibleName());
             assertEquals(AccessibleRole.TABLE, context.getAccessibleRole());
-            assertEquals(1, table.getAccessibleRowCount());
+            assertEquals(3, table.getAccessibleRowCount());
             assertEquals(1, table.getAccessibleColumnCount());
             Accessible cell = table.getAccessibleAt(0, 0);
             assertEquals(
@@ -220,7 +238,28 @@ final class SwingFixtureContractTest {
             assertNull(cell.getAccessibleContext().getAccessibleComponent());
             assertNull(cell.getAccessibleContext().getAccessibleAction());
             assertFalse(table.isAccessibleSelected(0, 0));
-            assertNull(table.getAccessibleAt(1, 0));
+            assertEquals(1, table.getAccessibleRowExtentAt(0, 0));
+            assertNull(table.getAccessibleAt(3, 0));
+            return null;
+        });
+    }
+
+    @Test
+    void syntheticTableMergedCellSpansTwoRowsAndHasBounds() throws Exception {
+        onEdt(() -> {
+            SyntheticAccessibleTable component = new SyntheticAccessibleTable();
+            AccessibleTable table = component.getAccessibleContext().getAccessibleTable();
+
+            Accessible topHalf = table.getAccessibleAt(1, 0);
+            Accessible bottomHalf = table.getAccessibleAt(2, 0);
+            assertEquals(
+                    "fixture.synthetic_merged_cell",
+                    topHalf.getAccessibleContext().getAccessibleName());
+            // A row-spanning cell reports the same Accessible for every row it covers.
+            assertEquals(topHalf, bottomHalf);
+            assertEquals(2, table.getAccessibleRowExtentAt(1, 0));
+            assertEquals(2, table.getAccessibleRowExtentAt(2, 0));
+            assertNotNull(topHalf.getAccessibleContext().getAccessibleComponent());
             return null;
         });
     }
@@ -261,7 +300,7 @@ final class SwingFixtureContractTest {
                     descriptions.incrementAndGet();
                 }
             });
-            JabDialogRepro.setStatus(status, "opened: Scenario A");
+            JabDialogRepro.setStatus(status, "opened: " + JabDialogRepro.SCENARIO_A_TITLE);
             assertEquals("repro.status", accessibleName(status));
             assertEquals("opened: Scenario A", accessibleDescription(status));
             assertTrue(descriptions.get() >= 1);
@@ -273,6 +312,73 @@ final class SwingFixtureContractTest {
             table.getModel().addTableModelListener(event -> modelEvents.incrementAndGet());
             find(tableTab, "fixture.mark_done_button", JButton.class).doClick();
             assertEquals(1, modelEvents.get());
+            return null;
+        });
+    }
+
+    @Test
+    void locatorTabHasStableDuplicateNamesAndActionabilityStates() throws Exception {
+        onEdt(() -> {
+            JPanel tab = new SwingFixtureApp().buildLocatorTab();
+
+            JPanel scopeAlpha = find(tab, "fixture.scope_alpha", JPanel.class);
+            JPanel scopeBeta = find(tab, "fixture.scope_beta", JPanel.class);
+            assertEquals(
+                    "duplicate in alpha",
+                    accessibleDescription(find(scopeAlpha, "fixture.duplicate", JButton.class)));
+            assertEquals(
+                    "duplicate in beta",
+                    accessibleDescription(find(scopeBeta, "fixture.duplicate", JButton.class)));
+
+            JButton visible = find(tab, "fixture.visible_button", JButton.class);
+            assertTrue(visible.isVisible());
+            assertTrue(visible.isEnabled());
+            assertEquals("visible and enabled", accessibleDescription(visible));
+
+            JButton hidden = find(tab, "fixture.hidden_button", JButton.class);
+            assertFalse(hidden.isVisible());
+            assertEquals("hidden but attached", accessibleDescription(hidden));
+
+            JButton disabled = find(tab, "fixture.locator_disabled_button", JButton.class);
+            assertFalse(disabled.isEnabled());
+            assertEquals("visible but disabled", accessibleDescription(disabled));
+            return null;
+        });
+    }
+
+    @Test
+    void dialogReproWindowTitlesMatchTheirWin32SearchContract() {
+        // The integration suite's Win32 window-title lookups (test_modal_dialogs.py,
+        // conftest.py's wait_for_raw_window) hard-code these same six strings
+        // independently, since Python cannot reference a Java constant - this test
+        // exists so a change to any one of `JabDialogRepro`'s title constants is at
+        // least caught on the Java side immediately, rather than only surfacing much
+        // later as a Win32 window-not-found failure in the slow integration suite.
+        assertEquals("JAB dialog repro", JabDialogRepro.MAIN_TITLE);
+        assertEquals("Scenario A", JabDialogRepro.SCENARIO_A_TITLE);
+        assertEquals("Scenario B", JabDialogRepro.SCENARIO_B_TITLE);
+        assertEquals("Scenario C", JabDialogRepro.SCENARIO_C_TITLE);
+        assertEquals("Scenario Nested", JabDialogRepro.SCENARIO_NESTED_TITLE);
+        assertEquals("Scenario First", JabDialogRepro.SCENARIO_FIRST_TITLE);
+    }
+
+    @Test
+    void lifecycleStatusTransitionsFromRunningToShuttingDownWithoutExitingTestJvm()
+            throws Exception {
+        // Deliberately never calls the real shutdown-button listener: that schedules
+        // a genuine `System.exit(0)` ~200ms later, which would kill this Gradle test
+        // JVM mid-suite. `markShuttingDown` isolates the observable text/description
+        // transition from the Timer/System.exit side effect (test-app-review.md
+        // finding C3-3).
+        onEdt(() -> {
+            JLabel status = LifecycleFixtureApp.createStatusLabel();
+            assertEquals("fixture.shutdown_status", accessibleName(status));
+            assertEquals("running", status.getText());
+            assertEquals("running", accessibleDescription(status));
+
+            LifecycleFixtureApp.markShuttingDown(status);
+            assertEquals("shutting-down", status.getText());
+            assertEquals("shutting-down", accessibleDescription(status));
             return null;
         });
     }
@@ -304,22 +410,35 @@ final class SwingFixtureContractTest {
 
     private static <T extends Component> T find(
             Container root, String name, Class<T> expectedType) {
+        Component match = findByName(root, name);
+        if (match == null) {
+            throw new AssertionError("No component with accessible name " + name);
+        }
+        // A single type check outside the search recursion: previously
+        // `assertInstanceOf`'s failure was thrown *inside* the recursive walk and
+        // caught by the same `catch (AssertionError ignored)` meant only for "not
+        // found in this subtree", silently discarding a genuine name-found /
+        // wrong-type mismatch and reporting the misleading "No component with
+        // accessible name" instead (test-app-review.md finding C3-5).
+        return assertInstanceOf(expectedType, match);
+    }
+
+    private static Component findByName(Container root, String name) {
         if (name.equals(accessibleName(root))) {
-            return assertInstanceOf(expectedType, root);
+            return root;
         }
         for (Component child : root.getComponents()) {
             if (name.equals(accessibleName(child))) {
-                return assertInstanceOf(expectedType, child);
+                return child;
             }
             if (child instanceof Container container) {
-                try {
-                    return find(container, name, expectedType);
-                } catch (AssertionError ignored) {
-                    // Continue searching sibling subtrees.
+                Component found = findByName(container, name);
+                if (found != null) {
+                    return found;
                 }
             }
         }
-        throw new AssertionError("No component with accessible name " + name);
+        return null;
     }
 
     private static <T> T onEdt(Callable<T> action) throws Exception {
