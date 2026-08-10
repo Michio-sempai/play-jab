@@ -676,13 +676,41 @@ class JavaApplication:
         self,
         *,
         title: str | None = None,
+        role: str | None = None,
+        states: str | Iterable[str] | None = None,
         timeout: int | None = None,
     ) -> WindowExpectation:
-        """Expect exactly one new top-level window created by this process."""
+        """Expect exactly one new top-level window created by this process.
+
+        A single user action can create more than one new Java top-level HWND
+        - for example a hidden shared-owner ``frame`` alongside the visible
+        modal ``JDialog`` it owns. Counting raw HWNDs would treat that as
+        ambiguity, so candidates are read through JAB into an
+        :class:`ElementSnapshot` first, and ``role``/``states`` (plus
+        ``title``, matched against the raw Win32 title) are applied to that
+        semantic snapshot before ambiguity is decided.
+
+        By default a candidate must have both the ``showing`` and ``visible``
+        states to match, which selects the presented user-facing window over
+        a hidden service root. Pass ``states=()`` to also consider hidden
+        roots.
+        """
         if title is not None and (not isinstance(title, str) or not title):
             raise ValueError("title must be a non-empty string")
+        registry = self._api._registry
+        if role is not None:
+            if not isinstance(role, str):
+                raise ValueError("role must be a string")
+            registry.role(role)
+        if states is None:
+            required_states = frozenset({"showing", "visible"})
+        else:
+            state_values = (states,) if isinstance(states, str) else states
+            required_states = frozenset(registry.state(state) for state in state_values)
         wait = self._api._timeout if timeout is None else _timeout(timeout)
-        return WindowExpectation(self, title=title, timeout=wait)
+        return WindowExpectation(
+            self, title=title, role=role, states=required_states, timeout=wait
+        )
 
 
 class WindowExpectation:
@@ -693,10 +721,13 @@ class WindowExpectation:
         application: JavaApplication,
         *,
         title: str | None,
+        role: str | None = None,
+        states: frozenset[str] = frozenset(),
         timeout: int,
     ) -> None:
         self._application = application
         self._title = title
+        self._query = _Query(role=role, states=states)
         self._timeout = timeout
         self._before: frozenset[int] | None = None
         self._value: JavaWindow | None = None
@@ -731,6 +762,11 @@ class WindowExpectation:
         return False
 
     def _raw_matches(self, before: frozenset[int]) -> list[int]:
+        """Cheap Win32-level candidates: new, same pid, matching title, Java.
+
+        Not a semantic match by itself - ``_semantic_candidates`` still has to
+        read each of these through JAB before ambiguity can be decided.
+        """
         windows = self._application._api._windows
         bridge = self._application._api._bridge
         return [
@@ -742,30 +778,44 @@ class WindowExpectation:
             and bridge.is_java_window(hwnd)
         ]
 
+    def _semantic_candidates(
+        self, before: frozenset[int]
+    ) -> tuple[list[tuple[int, ElementSnapshot]], int | None]:
+        api = self._application._api
+        bridge = api._bridge
+        registry = api._registry
+        candidates: list[tuple[int, ElementSnapshot]] = []
+        inaccessible: int | None = None
+        for hwnd in self._raw_matches(before):
+            try:
+                with bridge.context_from_hwnd(hwnd) as root:
+                    info = _context_info(bridge, root)
+            except (JavaWindowNotFoundError, JavaWindowNotAccessibleError):
+                inaccessible = hwnd
+                continue
+            except _StaleContext:
+                continue
+            snapshot = _snapshot(info, registry)
+            if self._query.matches(snapshot):
+                candidates.append((hwnd, snapshot))
+        return candidates, (inaccessible if not candidates else None)
+
     def _wait_for_new_window(self, before: frozenset[int]) -> JavaWindow:
         api = self._application._api
         deadline = time.monotonic() + self._timeout / 1_000
-        inaccessible: int | None = None
         while True:
             if not _is_process_alive(self._application.pid):
                 raise JavaProcessExitedError(
                     f"process {self._application.pid} exited while waiting for window"
                 )
-            matches = self._raw_matches(before)
-            inaccessible = matches[0] if len(matches) == 1 else None
-            if len(matches) > 1:
+            candidates, inaccessible = self._semantic_candidates(before)
+            if len(candidates) > 1:
                 raise JavaWindowAmbiguousError(
-                    f"window expectation resolved to {len(matches)} new windows"
+                    _format_ambiguous_windows(candidates, api._windows)
                 )
-            if matches:
-                hwnd = matches[0]
-                try:
-                    with api._bridge.context_from_hwnd(hwnd):
-                        pass
-                except (JavaWindowNotFoundError, JavaWindowNotAccessibleError):
-                    pass
-                else:
-                    return JavaWindow(self._application, hwnd, self._timeout)
+            if candidates:
+                hwnd, _ = candidates[0]
+                return JavaWindow(self._application, hwnd, self._timeout)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if inaccessible is not None:
@@ -779,6 +829,19 @@ class WindowExpectation:
                     f"{self._application.pid}"
                 )
             api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
+
+
+def _format_ambiguous_windows(
+    candidates: list[tuple[int, ElementSnapshot]], windows: WindowBackend
+) -> str:
+    lines = [f"window expectation resolved to {len(candidates)} new windows:"]
+    for hwnd, snapshot in candidates:
+        lines.append(
+            f"  hwnd={hwnd:#x} title={windows.get_window_title(hwnd)!r} "
+            f"role={snapshot.role!r} states={sorted(snapshot.states)!r} "
+            f"bounds=({snapshot.x}, {snapshot.y}, {snapshot.width}, {snapshot.height})"
+        )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)

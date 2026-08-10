@@ -23,6 +23,43 @@ PID = 4242
 OWNER = 0x100
 DIALOG = 0x200
 OTHER_DIALOG = 0x300
+SERVICE_FRAME = 0x400
+USER_FRAME = 0x500
+
+_TITLES = {
+    OWNER: "Owner",
+    DIALOG: "Expected",
+    OTHER_DIALOG: "Other",
+    SERVICE_FRAME: "",
+    USER_FRAME: "Frame",
+}
+
+# A hidden shared-owner frame Swing may create alongside a modal JDialog: a
+# real Java top-level HWND, but not the window the caller is waiting for.
+SERVICE_FRAME_NODE = FakeNode(
+    name="",
+    role_en_us="frame",
+    states_en_us="enabled,focusable,resizable",
+    x=-1,
+    y=-1,
+    width=-1,
+    height=-1,
+)
+DIALOG_NODE = FakeNode(
+    name="Information",
+    role_en_us="dialog",
+    states_en_us="active,enabled,focusable,modal,showing,visible",
+)
+OTHER_DIALOG_NODE = FakeNode(
+    name="Other",
+    role_en_us="dialog",
+    states_en_us="active,enabled,focusable,modal,showing,visible",
+)
+USER_FRAME_NODE = FakeNode(
+    name="MainFrame",
+    role_en_us="frame",
+    states_en_us="enabled,focusable,resizable,showing,visible",
+)
 
 
 class _Processes:
@@ -46,19 +83,21 @@ def _application(
     monkeypatch: pytest.MonkeyPatch,
     *,
     accessible: tuple[int, ...] = (OWNER, DIALOG, OTHER_DIALOG),
+    nodes: dict[int, FakeNode] | None = None,
     make_backend: type[FakeBackend] = FakeBackend,
 ) -> tuple[PlayJab, JavaApplication, FakeWindowBackend, _Processes]:
-    nodes = {
-        hwnd: FakeNode(
-            name=f"window-{hwnd}",
-            role_en_us="dialog",
-            states_en_us="enabled,visible,showing",
-        )
-        for hwnd in accessible
-    }
+    if nodes is None:
+        nodes = {
+            hwnd: FakeNode(
+                name=f"window-{hwnd}",
+                role_en_us="dialog",
+                states_en_us="enabled,visible,showing",
+            )
+            for hwnd in accessible
+        }
     runtime = BridgeRuntime(lambda: make_backend(nodes))
     windows = FakeWindowBackend(
-        {OWNER: "Owner", DIALOG: "Expected", OTHER_DIALOG: "Other"},
+        dict(_TITLES),
         pid=PID,
         visible=[OWNER],
         guard_input=True,
@@ -202,6 +241,118 @@ def test_expect_window_reports_process_exit_and_preserves_body_exception(
             windows.visible.append(DIALOG)
             raise original
         assert caught.value is original
+    finally:
+        api.close()
+
+
+def test_expect_window_waits_past_hidden_service_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared-owner service frame appearing before the real dialog must not
+    be mistaken for the target window on the first raw HWND it sees -
+    expect_window() keeps polling for a semantic match instead."""
+    api, application, windows, _ = _application(
+        monkeypatch,
+        nodes={SERVICE_FRAME: SERVICE_FRAME_NODE, DIALOG: DIALOG_NODE},
+    )
+    try:
+        original_enum = windows.enum_windows
+        calls = {"count": 0}
+        # 1st call: WindowExpectation.__enter__'s "before" snapshot.
+        # 2nd call: the first poll, after the frame alone is visible.
+        # 3rd call: the second poll, once the dialog has caught up.
+        dialog_appears_on_call = 3
+
+        def enum_with_delayed_dialog() -> list[int]:
+            calls["count"] += 1
+            if calls["count"] == dialog_appears_on_call:
+                windows.visible.append(DIALOG)
+            return original_enum()
+
+        windows.enum_windows = enum_with_delayed_dialog  # type: ignore[method-assign]
+
+        with application.expect_window(
+            role="dialog", states={"modal", "showing"}, timeout=1_000
+        ) as pending:
+            windows.visible.append(SERVICE_FRAME)
+
+        assert pending.value.hwnd == DIALOG
+        assert api.live_ref_count == 0
+    finally:
+        api.close()
+
+
+def test_expect_window_filters_before_ambiguity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two new raw Java HWNDs, only one of which is a semantic match, resolve
+    to that one instead of raising ambiguity on raw HWND count."""
+    api, application, windows, _ = _application(
+        monkeypatch,
+        nodes={SERVICE_FRAME: SERVICE_FRAME_NODE, DIALOG: DIALOG_NODE},
+    )
+    try:
+        with application.expect_window(role="dialog", states="modal") as pending:
+            windows.visible.extend([SERVICE_FRAME, DIALOG])
+        assert pending.value.hwnd == DIALOG
+        assert api.live_ref_count == 0
+    finally:
+        api.close()
+
+
+def test_expect_window_is_ambiguous_after_semantic_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two real, equally-matching dialogs are still ambiguous - the fix only
+    removes false ambiguity, not genuine ambiguity."""
+    api, application, windows, _ = _application(
+        monkeypatch,
+        nodes={DIALOG: DIALOG_NODE, OTHER_DIALOG: OTHER_DIALOG_NODE},
+    )
+    try:
+        with (
+            pytest.raises(JavaWindowAmbiguousError),
+            application.expect_window(role="dialog", states="modal"),
+        ):
+            windows.visible.extend([DIALOG, OTHER_DIALOG])
+    finally:
+        api.close()
+
+
+def test_expect_window_can_select_visible_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The semantic filter is not hardcoded to dialogs - a plain visible
+    JFrame can be the awaited window too."""
+    api, application, windows, _ = _application(
+        monkeypatch,
+        nodes={USER_FRAME: USER_FRAME_NODE},
+    )
+    try:
+        with application.expect_window(role="frame", states="showing") as pending:
+            windows.visible.append(USER_FRAME)
+        assert pending.value.hwnd == USER_FRAME
+        assert api.live_ref_count == 0
+    finally:
+        api.close()
+
+
+def test_expect_window_times_out_on_service_frame_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the hidden service frame ever appears - expect_window() must time
+    out as not-found, never resolve to the service HWND and never raise
+    ambiguous or inaccessible."""
+    api, application, windows, _ = _application(
+        monkeypatch,
+        nodes={SERVICE_FRAME: SERVICE_FRAME_NODE},
+    )
+    try:
+        with (
+            pytest.raises(JavaWindowNotFoundError),
+            application.expect_window(role="dialog", states="modal", timeout=0),
+        ):
+            windows.visible.append(SERVICE_FRAME)
     finally:
         api.close()
 

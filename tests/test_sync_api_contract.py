@@ -77,7 +77,13 @@ def test_the_public_types_are_exported_from_sync_api() -> None:
     assert _parameters(Locator.exists) == ("self",)
     assert _parameters(Locator.wait_for) == ("self", "state", "timeout")
     assert _parameters(Locator.click) == ("self", "opens_window", "timeout")
-    assert _parameters(JavaApplication.expect_window) == ("self", "title", "timeout")
+    assert _parameters(JavaApplication.expect_window) == (
+        "self",
+        "title",
+        "role",
+        "states",
+        "timeout",
+    )
     assert inspect.isclass(WindowExpectation)
 
 

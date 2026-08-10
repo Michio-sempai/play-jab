@@ -111,7 +111,7 @@ def test_message_dialog_via_joptionpane(swing_fixture: SwingFixture) -> None:
     fixture-chosen constant.
 
     Uses ``expect_window()`` without ``title=`` - the only scenario in this
-    suite exercising that path, matching the untitled call from a real-world
+    suite exercising that path, matching an untitled call from a real-world
     JAB client bug report."""
     if not can_change_foreground_window(swing_fixture.hwnd):
         pytest.skip(
