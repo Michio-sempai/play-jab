@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ _WINDOW_TITLE = "JAB swing fixture"
 _SECONDARY_WINDOW_TITLE = "JAB swing fixture secondary"
 _WINDOW_TIMEOUT = 20.0
 _PROCESS_TIMEOUT = 10.0
+_TEARDOWN_WATCHDOG_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,13 +356,54 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=_PROCESS_TIMEOUT)
 
 
+@contextlib.contextmanager
+def _bounded_playjab(*, timeout: int, dll_path: Path) -> Iterator[PlayJab]:
+    """Same as ``with PlayJab(...) as api:``, but ``close()`` cannot hang the
+    whole session silently.
+
+    ``BridgeRuntime._submit()``/``close()`` (src/play_jab/_native/bridge.py)
+    are deliberately unbounded - an in-flight native call cannot be safely
+    cancelled. If a modal-dialog interaction anywhere in this session leaves
+    that process-wide shared worker wedged, the next fixture to close a
+    ``PlayJab`` here would otherwise block forever with no diagnostic output
+    (see .todo/play-jab-bugs/integration-modal-suite-hang.md). This watchdog
+    does not change that production behaviour; it only turns a silent hang
+    into a loud, diagnosable test failure, on a thread separate from the one
+    actually blocked in the native call.
+    """
+    api = PlayJab(timeout=timeout, dll_path=dll_path)
+    api.__enter__()
+    try:
+        yield api
+    finally:
+        finished = threading.Event()
+
+        def _close() -> None:
+            try:
+                api.close()
+            finally:
+                finished.set()
+
+        threading.Thread(target=_close, daemon=True).start()
+        if not finished.wait(_TEARDOWN_WATCHDOG_SECONDS):
+            pytest.fail(
+                "PlayJab.close() did not return within "
+                f"{_TEARDOWN_WATCHDOG_SECONDS:.0f}s - the shared JAB worker "
+                "is likely wedged by a blocked native call from an earlier "
+                "modal-dialog interaction, see "
+                "integration-modal-suite-hang.md"
+            )
+
+
 def _wait_for_accessible_windows(
     process: subprocess.Popen[str],
     dll_path: Path,
     *titles: str,
 ) -> None:
     """Wait until every expected top-level window is visible through JAB."""
-    with PlayJab(timeout=int(_WINDOW_TIMEOUT * 1_000), dll_path=dll_path) as api:
+    with _bounded_playjab(
+        timeout=int(_WINDOW_TIMEOUT * 1_000), dll_path=dll_path
+    ) as api:
         application = api.attach(pid=process.pid)
         for title in titles:
             application.window(title=title)
