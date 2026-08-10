@@ -857,6 +857,20 @@ class JavaWindow:
     def get_by_name(self, name: TextMatcher) -> Locator:
         return self.locator(name=name)
 
+    def snapshot(self) -> ElementSnapshot:
+        """Read the top-level window context without traversing descendants."""
+        for attempt in range(2):
+            try:
+                with self._api._bridge.context_from_hwnd(self.hwnd) as root:
+                    info = _context_info(self._api._bridge, root)
+                    return _snapshot(info, self._api._registry)
+            except _StaleContext:
+                if attempt:
+                    raise LocatorError(
+                        "window accessibility context remained stale after retry"
+                    ) from None
+        raise AssertionError("unreachable")
+
     def accessibility_tree(
         self,
         max_depth: int = 10,

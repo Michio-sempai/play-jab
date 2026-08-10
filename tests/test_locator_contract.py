@@ -122,6 +122,18 @@ def test_role_state_visibility_and_index_filters_compose(
     assert window.locator(role="push button", index_in_parent=1).count() == 1
 
 
+def test_window_snapshot_reads_only_the_root_context(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, runtime, backend = locator_api
+    acquired = backend.acquired
+    snapshot = window.snapshot()
+    assert (snapshot.name, snapshot.role) == ("Fixture", "frame")
+    assert backend.acquired - acquired == 1
+    assert runtime.live_ref_count == 0
+    assert backend.live_cookies == frozenset()
+
+
 def test_nested_locator_resolves_parent_strictly_and_only_searches_descendants(
     locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
 ) -> None:
