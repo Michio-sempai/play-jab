@@ -86,7 +86,9 @@ Use `window.snapshot()` for root-window metadata without a descendant scan and
 `locator.exists()` for an immediate, non-strict first-match check. `first()` and
 `nth()` stop after the requested match. A locator with `showing_only=True`
 matches showing nodes and prunes non-showing subtrees; `visible_only=True` only
-filters matches and intentionally does not prune.
+filters matches and intentionally does not prune. `max_depth=` caps how far a
+locator descends relative to its own starting point, so a deep, showing
+sibling that sorts before a shallow target is never fully walked.
 
 Do not import from `play_jab._native`: its names, signatures, and lifecycle
 contracts may change without notice.

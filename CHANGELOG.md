@@ -5,6 +5,12 @@
 - add root-only `JavaWindow.snapshot()`, immediate `Locator.exists()`, and
   pruning `showing_only` locator traversal
 - stop `first()` and `nth()` traversal once the requested match is found
+- add `max_depth` to `locator()`/`get_by_role()`/`get_by_name()` to bound
+  traversal depth
+
+### Fix
+
+- filter non-Java HWNDs out of `expect_window()` before its ambiguity check
 
 ## v2026.08.5 (2026-08-10)
 

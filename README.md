@@ -95,6 +95,9 @@ immediate, non-strict first-match check; use `wait_for()` when polling is
 required. Positional `first()` and `nth()` locators stop traversal once their
 requested match is found. Set `showing_only=True` to match showing nodes and
 prune non-showing subtrees; `visible_only=True` keeps its non-pruning behavior.
+Pass `max_depth=` to cap how far a locator descends relative to its own
+starting point, so a shallow target behind a deep, showing sibling does not
+force a full traversal of that sibling first.
 
 Form locators support `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
 `select_option()`, `text_content()`, and state/attribute reads. Password text may
