@@ -9,6 +9,10 @@ repositories {
 dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.2")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
+    // Gradle 8.10 still auto-loads this for us but warns that it will stop doing
+    // so in Gradle 9.0; declaring it explicitly keeps `test` working across the
+    // upgrade instead of failing silently with "no tests found".
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 java {
@@ -35,6 +39,7 @@ application {
 // javac would otherwise fall back to the Windows platform charset.
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
+    options.compilerArgs.add("-Xlint:all")
 }
 
 tasks.test {
@@ -60,6 +65,17 @@ tasks.register<JavaExec>("runDialogRepro") {
     mainClass.set("FixtureLauncher")
     classpath = sourceSets["main"].runtimeClasspath
     jvmArgs = jabJvmArgs
+    args = listOf("dialog")
+}
+
+tasks.register<JavaExec>("runDialogRepro125") {
+    group = "application"
+    description =
+        "Show the JDialog JAB-access regression fixture at 125% Windows display " +
+        "scaling (CONCEPT.MD §7's DPI matrix requirement for the dialog fixture)."
+    mainClass.set("FixtureLauncher")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs = jabJvmArgs + listOf("-Dsun.java2d.uiScale=1.25")
     args = listOf("dialog")
 }
 

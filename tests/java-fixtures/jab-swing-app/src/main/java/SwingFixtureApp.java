@@ -1,25 +1,39 @@
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.Container;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.awt.FocusTraversalPolicy;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.FocusListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.Arrays;
+import java.util.Locale;
+import javax.accessibility.Accessible;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
+import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JMenu;
+import javax.swing.JMenuBar;
+import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
+import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
+import javax.swing.JSlider;
 import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
@@ -28,6 +42,8 @@ import javax.swing.JTree;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import javax.swing.UIManager;
+import javax.swing.UnsupportedLookAndFeelException;
 import javax.swing.WindowConstants;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.tree.DefaultMutableTreeNode;
@@ -50,18 +66,38 @@ import javax.swing.tree.DefaultTreeModel;
  * {@code "JAB swing fixture secondary"}; это детерминированный сценарий
  * строгого поиска окна без селектора.
  *
+ * <h2>Опциональные системные свойства</h2>
+ * {@code -Dfixture.lookAndFeel=windows} — реальный Windows L&amp;F вместо
+ * кросс-платформенного Metal по умолчанию (для теста, что locator/accessible-name
+ * поведение не зависит от L&amp;F). {@code -Dfixture.autoNode=false} — отключает
+ * 3000&nbsp;мс цикл {@code fixture.auto_node} целиком, для тестов точного
+ * live-reference count, которым мешает его собственный attach/detach трафик.
+ *
  * <h2>Accessible-имена (стабильные, не зависят от локали)</h2>
  * <pre>
  * fixture.main                      JFrame            главное окно fixture
- * fixture.tabs                      JTabbedPane       четыре вкладки
+ * fixture.menu_bar                  JMenuBar          строка меню главного окна
+ * fixture.menu_file                 JMenu             меню "File" (обычное действие + диалог)
+ * fixture.menu_item_status          JMenuItem         обычное действие: пишет в fixture.status_label
+ * fixture.menu_item_open_dialog     JMenuItem         открывает APPLICATION_MODAL fixture.menu_dialog
+ * fixture.menu_dialog               JDialog           открыт из меню, а не из кнопки
+ * fixture.menu_dialog_label         JLabel            содержимое fixture.menu_dialog
+ * fixture.menu_dialog_close_button  JButton           закрывает fixture.menu_dialog
+ * fixture.menu_dialogs              JMenu             меню "Dialogs" (три JOptionPane)
+ * fixture.menu_item_message_dialog  JMenuItem         открывает JOptionPane.showMessageDialog
+ * fixture.menu_item_confirm_dialog  JMenuItem         открывает JOptionPane Yes/No (явные labels)
+ * fixture.menu_item_input_dialog    JMenuItem         открывает JOptionPane с текстовым полем
+ * fixture.tabs                      JTabbedPane       пять вкладок
  * fixture.tab_form_page             page tab          заголовок вкладки "Form"
  * fixture.tab_table_page            page tab          заголовок вкладки "Table"
  * fixture.tab_dynamic_page          page tab          заголовок вкладки "Dynamic"
  * fixture.tab_locator_page          page tab          заголовок вкладки "Locator"
+ * fixture.tab_workloads_page        page tab          заголовок вкладки "Workloads"
  * fixture.tab_form                  JPanel            содержимое вкладки "Form"
  * fixture.tab_table                 JPanel            содержимое вкладки "Table"
  * fixture.tab_dynamic               JPanel            содержимое вкладки "Dynamic"
  * fixture.tab_locator               JPanel            read-only locator-сценарии
+ * fixture.tab_workloads             JPanel            виртуализация и динамика workload'ов
  *
  * fixture.username_field            JTextField        обычный текстовый ввод (fill/clear)
  * fixture.password_field            JPasswordField    password text; содержимое не логируется
@@ -75,9 +111,15 @@ import javax.swing.tree.DefaultTreeModel;
  *
  * fixture.table                     JTable            100 строк x 5 колонок, см. ниже
  * fixture.synthetic_table           AccessibleTable   diagnostic non-actionable cell
+ * fixture.synthetic_cell_0_0        AccessibleContext ячейка без bounds и без action
+ * fixture.synthetic_row_header_0    AccessibleContext row header, которого не даёт настоящий JTable
+ * fixture.synthetic_merged_cell     AccessibleContext строки 1-2: rowExtent=2, с bounds
  * fixture.table_scrollbar_vertical  JScrollBar        AccessibleValue для ручной прокрутки
  * fixture.mark_done_button          JButton           cell(7, 3): "Processing" -> "Done"
  * fixture.reset_table_button        JButton           возвращает cell(7, 3) в "Processing"
+ * fixture.table_add_row_button      JButton           100 -> 101 строк (см. fixture.table_row_count_status)
+ * fixture.table_remove_row_button   JButton           101 -> 100 строк
+ * fixture.table_row_count_status    JLabel            "rows=&lt;N&gt;", обновляется TableModelListener'ом
  * fixture.select_row_button         JButton           строка 7 + все 5 колонок (mixed mode)
  * fixture.select_column_button      JButton           колонка 3 + все 100 строк (mixed mode)
  * fixture.select_few_button         JButton           строки 1, 3, 5; column selection выключен
@@ -95,9 +137,40 @@ import javax.swing.tree.DefaultTreeModel;
  * fixture.visible_button            JButton           видимый и enabled
  * fixture.hidden_button             JButton           в дереве, но setVisible(false)
  * fixture.locator_disabled_button   JButton           видимый, но disabled
+ * fixture.state_panel               JPanel            контейнер visible/hidden/disabled кнопок
+ * fixture.scopes                    JPanel            контейнер fixture.scope_alpha/beta
  * fixture.auto_panel                JPanel            контейнер автоматически меняемого узла
- * fixture.auto_node                 JLabel            каждые 1500 мс добавляется/удаляется
+ * fixture.auto_node                 JLabel            каждые 3000 мс добавляется/удаляется
+ * fixture.value_panel               JPanel            контейнер AccessibleValue-виджетов
+ * fixture.progress_bar              JProgressBar      AccessibleValue 0..100, текущее 42
+ * fixture.slider                    JSlider           AccessibleValue 0..10, текущее 3
+ * fixture.text_and_render_panel     JPanel            контейнер длинного текста и custom renderer
+ * fixture.boundary_text_field       JTextField        2002 code unit, суррогатная пара на границе чанка 1023
+ * fixture.custom_rendered_list      JList             3 элемента, кастомный ListCellRenderer
  * fixture.secondary                 JFrame            опциональное второе top-level окно
+ * fixture.secondary_label           JLabel            содержимое fixture.secondary
+ *
+ * fixture.virtual_list              JList             виртуализированный список на 1000 элементов
+ * fixture.virtual_list_start_button JButton           прокручивает к элементу 0
+ * fixture.virtual_list_500_button   JButton           прокручивает к элементу 500
+ * fixture.virtual_list_end_button   JButton           прокручивает к элементу 999
+ * fixture.virtual_list_status       JLabel            "first=&lt;N&gt; last=&lt;N&gt;" видимого диапазона
+ * fixture.virtual_list_scrollbar_vertical  JScrollBar  вертикальная прокрутка списка
+ * fixture.virtual_tree              JTree             виртуализированное дерево: 40 групп x 5 узлов
+ * fixture.virtual_tree_group_NN     tree node         группа 00..39
+ * fixture.virtual_tree_group_NN_item_MM  tree node    узел MM группы NN
+ * fixture.virtual_tree_expand_button   JButton        разворачивает все строки дерева
+ * fixture.virtual_tree_collapse_button JButton        сворачивает все строки, кроме корня
+ * fixture.virtual_tree_show_button     JButton        выделяет и скроллит к последней строке
+ * fixture.virtual_tree_reset_button    JButton        снимает выделение, скроллит к началу
+ * fixture.virtual_tree_status          JLabel         "expanded=.. selected=.. first=.. last=.."
+ * fixture.workload_dynamic_host     JPanel            хост для attach/detach/replace-сценариев
+ * fixture.workload_dynamic_node     JLabel            description = "generation=&lt;N&gt;"
+ * fixture.workload_attach_button    JButton           добавляет узел, если он отсутствует
+ * fixture.workload_detach_button    JButton           убирает узел из хоста
+ * fixture.workload_visibility_button JButton          переключает setVisible на узле
+ * fixture.workload_enabled_button   JButton           переключает setEnabled на узле
+ * fixture.workload_replace_button   JButton           убирает и добавляет узел новой generation
  * </pre>
 
  * <h2>Read-only locator-сценарии</h2>
@@ -106,9 +179,11 @@ import javax.swing.tree.DefaultTreeModel;
  * {@code "duplicate in alpha"} и {@code "duplicate in beta"}. Скрытая кнопка
  * остаётся дочерним компонентом {@code fixture.tab_locator}, но не получает
  * visible/showing state. {@code fixture.auto_node} отсутствует при старте,
- * затем Swing Timer каждые 1500 мс попеременно добавляет и удаляет его. Поэтому
- * polling-тест может переждать как attached, так и detached независимо от того,
- * насколько быстро он подключился к процессу.
+ * затем Swing Timer каждые 3000 мс попеременно добавляет и удаляет его — окно
+ * достаточно широкое, чтобы обход виртуализированных деревьев на вкладке
+ * Workloads на медленных установках JAB не терял такт. Поэтому polling-тест
+ * может переждать как attached, так и detached независимо от того, насколько
+ * быстро он подключился к процессу.
  *
  * <h2>Как читать текст лейблов</h2>
  * Обычный (не-HTML) {@code JLabel} не публикует {@code AccessibleText}:
@@ -128,8 +203,8 @@ import javax.swing.tree.DefaultTreeModel;
  * AccessibleAction</b>, поэтому кликнуть по вкладке через
  * {@code doAccessibleActions} нельзя. Переключение идёт через
  * {@code AccessibleSelection} самого {@code fixture.tabs}:
- * {@code addAccessibleSelection(index)}, где 0 = Form, 1 = Table, 2 = Dynamic.
- * Приложение стартует на вкладке Form.
+ * {@code addAccessibleSelection(index)}, где 0 = Form, 1 = Table, 2 = Dynamic,
+ * 3 = Locator, 4 = Workloads. Приложение стартует на вкладке Form.
  *
  * <h2>Таблица {@code fixture.table}</h2>
  * <ul>
@@ -144,6 +219,14 @@ import javax.swing.tree.DefaultTreeModel;
  *       ({@code wait_for_text("Done")}), {@code fixture.reset_table_button} —
  *       обратно, чтобы тест можно было повторить без перезапуска процесса.
  *       Остальные строки в колонке Status всегда {@code "Queued"}.</li>
+ *   <li>Изменяемое число строк: {@code fixture.table_add_row_button} переводит
+ *       {@code row_count()} 100 &rarr; 101 (добавляет {@code "job-100"}),
+ *       {@code fixture.table_remove_row_button} — обратно; повторное нажатие
+ *       кнопки при уже применённом состоянии не действует ({@code row_count()}
+ *       не выходит за 100..101). {@code fixture.table_row_count_status}
+ *       публикует {@code "rows=&lt;N&gt;"} через {@code TableModelListener} —
+ *       наблюдаемый сигнал именно {@code PropertyTableModelChange}, а не
+ *       polling значения ячейки.</li>
  * </ul>
  *
  * <h3>Видимые и невидимые строки</h3>
@@ -188,13 +271,22 @@ import javax.swing.tree.DefaultTreeModel;
  * ячейка как цель для {@code doAccessibleActions} не тестируется нигде в этой
  * fixture.
  *
- * <p>Прокрутка проверена: у {@code fixture.table_scrollbar_vertical} есть
- * AccessibleValue с диапазоном {@code 0..1440};
- * {@code setCurrentAccessibleValue(1440)} возвращает true, после чего
- * {@code showing} получают строки <b>90..99</b>, а строка 7 его теряет. То есть
- * строка 99 действительно материализуется. При этом {@code getBounds()} ячейки
- * не меняется ({@code y == 1584} — координата внутри таблицы, а не экрана), а
- * {@code getAccessibleAction()} остаётся null.
+ * <p><b>Прокрутка: как её проверять из play_jab, а не in-process.</b>
+ * {@code fixture.table_scrollbar_vertical} действительно материализует строки
+ * при прокрутке — измерено в процессе вызовом
+ * {@code AccessibleValue.setCurrentAccessibleValue(1440)}, после чего
+ * {@code showing} получают строки <b>90..99</b>, а строка 7 его теряет
+ * ({@code getBounds()} ячейки при этом не меняется — {@code y == 1584} остаётся
+ * координатой внутри таблицы, не экрана, — и {@code getAccessibleAction()}
+ * остаётся null). <b>Этот setter недоступен из play_jab</b>: CONCEPT.MD §7
+ * («AccessibleValue доступен только для чтения — JDK 17 JAB не экспортирует
+ * setter») и сам факт, что в {@code src/play_jab/} нет ни одного вызова
+ * {@code setCurrentAccessibleValue}, а есть только {@code Locator.scroll(steps)},
+ * посылающий явный Win32 mouse-wheel по экранным координатам цели. Тест на
+ * прокрутку этой fixture обязан идти через {@code Locator.scroll()}, а не
+ * пытаться писать в {@code AccessibleValue} напрямую — приведённые выше числа
+ * лишь доказывают, что материализация в принципе работает на этой fixture,
+ * а не то, как её вызывать из библиотеки.
  *
  * <h3>Selection</h3>
  * Кнопки выделения работают в двух разных режимах JTable, и это важно:
@@ -253,7 +345,7 @@ public final class SwingFixtureApp {
      * вкладки. Иначе граница видимых строк уезжает и её нельзя зафиксировать
      * в тесте.
      */
-    private static final int VISIBLE_ROW_COUNT = 10;
+    static final int VISIBLE_ROW_COUNT = 10;
 
     /** Ячейка с изменяемым значением; совпадает с примером в CONCEPT.MD §6. */
     private static final int MUTABLE_ROW = 7;
@@ -279,9 +371,34 @@ public final class SwingFixtureApp {
     private int replaceGeneration;
 
     public static void main(String[] args) {
+        // Deterministic accessible names for JOptionPane's own buttons ("OK", "Yes",
+        // "No"), which Swing draws from a Locale-keyed UIManager resource bundle and
+        // which this fixture does not otherwise control the creation of.
+        Locale.setDefault(Locale.ENGLISH);
+        applyLookAndFeel();
         boolean secondWindow = Arrays.asList(args).contains("--second-window")
                 || Boolean.getBoolean("fixture.secondWindow");
         SwingUtilities.invokeLater(() -> new SwingFixtureApp().show(secondWindow));
+    }
+
+    /**
+     * {@code -Dfixture.lookAndFeel=windows} switches to the real Windows L&amp;F
+     * instead of Swing's default cross-platform ("Metal") one. Every other launch
+     * mode/task in this fixture uses the default deliberately; this is an opt-in
+     * scene for a test that needs to prove locator/accessible-name behavior is
+     * L&amp;F-independent, not the default for every test run - test-app-review.md
+     * finding B4.
+     */
+    private static void applyLookAndFeel() {
+        if (!"windows".equals(System.getProperty("fixture.lookAndFeel"))) {
+            return;
+        }
+        try {
+            UIManager.setLookAndFeel("com.sun.java.swing.plaf.windows.WindowsLookAndFeel");
+        } catch (ReflectiveOperationException | UnsupportedLookAndFeelException error) {
+            System.err.println(
+                    "WARNING: could not apply the Windows look and feel: " + error);
+        }
     }
 
     private void show(boolean secondWindow) {
@@ -300,15 +417,137 @@ public final class SwingFixtureApp {
             }
         });
 
+        frame.setJMenuBar(buildMenuBar(frame));
         JTabbedPane tabs = buildTabs();
         frame.add(tabs, BorderLayout.CENTER);
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
-        startAutoNodeCycle();
+        // -Dfixture.autoNode=false opts out of fixture.auto_node's 3000ms
+        // attach/detach cycle entirely, for tests asserting an exact, stable
+        // live-reference count where the timer's own attach/detach traffic would
+        // otherwise be an unrelated source of noise (test-app-review.md finding C9).
+        if (!"false".equals(System.getProperty("fixture.autoNode"))) {
+            startAutoNodeCycle();
+        }
         if (secondWindow) {
             showSecondaryWindow(frame);
         }
+    }
+
+    /**
+     * Menu bar and its two menus: a plain-action menu item (the same shape as any
+     * other button, addressed through {@code JMenu}/{@code JPopupMenu} rather than a
+     * flat panel) and three {@code JOptionPane} launchers. {@code JMenu}'s dropdown
+     * materializes as a real {@code JPopupMenu} only once raised, matching how a real
+     * application's menu behaves - it is not present in the tree beforehand.
+     */
+    private JMenuBar buildMenuBar(JFrame frame) {
+        JMenuBar menuBar = new JMenuBar();
+        menuBar.getAccessibleContext().setAccessibleName("fixture.menu_bar");
+
+        JMenu fileMenu = new JMenu("File");
+        fileMenu.getAccessibleContext().setAccessibleName("fixture.menu_file");
+
+        JMenuItem statusItem = new JMenuItem("Set status");
+        statusItem.getAccessibleContext().setAccessibleName("fixture.menu_item_status");
+        statusItem.addActionListener(
+                e -> setLabelText(statusLabel, "menu action invoked"));
+
+        JMenuItem dialogItem = new JMenuItem("Open dialog...");
+        dialogItem.getAccessibleContext().setAccessibleName("fixture.menu_item_open_dialog");
+        dialogItem.addActionListener(e -> openMenuDialog(frame));
+
+        fileMenu.add(statusItem);
+        fileMenu.add(dialogItem);
+
+        JMenu dialogsMenu = new JMenu("Dialogs");
+        dialogsMenu.getAccessibleContext().setAccessibleName("fixture.menu_dialogs");
+
+        JMenuItem messageItem = new JMenuItem("Message...");
+        messageItem.getAccessibleContext().setAccessibleName("fixture.menu_item_message_dialog");
+        messageItem.addActionListener(e -> showMessageDialog(frame));
+
+        JMenuItem confirmItem = new JMenuItem("Confirm...");
+        confirmItem.getAccessibleContext().setAccessibleName("fixture.menu_item_confirm_dialog");
+        confirmItem.addActionListener(e -> showConfirmDialog(frame));
+
+        JMenuItem inputItem = new JMenuItem("Input...");
+        inputItem.getAccessibleContext().setAccessibleName("fixture.menu_item_input_dialog");
+        inputItem.addActionListener(e -> showInputDialog(frame));
+
+        dialogsMenu.add(messageItem);
+        dialogsMenu.add(confirmItem);
+        dialogsMenu.add(inputItem);
+
+        menuBar.add(fileMenu);
+        menuBar.add(dialogsMenu);
+        return menuBar;
+    }
+
+    /**
+     * Application-modal dialog opened from a menu item rather than a button, for
+     * {@code click(opens_window=True)} exercised through the menu path. Modal and
+     * shown synchronously on the EDT, exactly like {@code fixture.submit_button}
+     * would if it opened a dialog - JAB is blocked for as long as it stays open.
+     */
+    private void openMenuDialog(JFrame owner) {
+        JDialog dialog = new JDialog(owner, "Fixture Menu Dialog", true);
+        dialog.getAccessibleContext().setAccessibleName("fixture.menu_dialog");
+
+        JLabel content = new JLabel("Opened from menu");
+        content.getAccessibleContext().setAccessibleName("fixture.menu_dialog_label");
+
+        JButton close = new JButton("Close");
+        close.getAccessibleContext().setAccessibleName("fixture.menu_dialog_close_button");
+        close.addActionListener(e -> dialog.dispose());
+
+        JPanel contentPanel = new JPanel();
+        contentPanel.add(content);
+        contentPanel.add(close);
+        dialog.setContentPane(contentPanel);
+        dialog.pack();
+        dialog.setLocationRelativeTo(owner);
+        dialog.setVisible(true);
+    }
+
+    /**
+     * {@code JOptionPane} launchers. Unlike {@link JabDialogRepro}, these are not a
+     * modal-hang regression fixture - they exist so integration tests have at least
+     * one scenario built from Swing's own dialog factory rather than a hand-rolled
+     * {@code JDialog}, whose content pane and buttons are assembled by the current
+     * Look&amp;Feel, not by this fixture. Titles are plain window titles (Win32-level,
+     * like every other window in this fixture), not accessible names.
+     */
+    private void showMessageDialog(JFrame owner) {
+        JOptionPane.showMessageDialog(
+                owner, "Fixture message", "Fixture Message", JOptionPane.INFORMATION_MESSAGE);
+        setLabelText(statusLabel, "message dialog closed");
+    }
+
+    private void showConfirmDialog(JFrame owner) {
+        int result = JOptionPane.showOptionDialog(
+                owner,
+                "Confirm the fixture action?",
+                "Fixture Confirm",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                new Object[] {"Yes", "No"},
+                "Yes");
+        setLabelText(statusLabel, "confirm result=" + (result == JOptionPane.YES_OPTION));
+    }
+
+    private void showInputDialog(JFrame owner) {
+        Object value = JOptionPane.showInputDialog(
+                owner,
+                "Enter a value",
+                "Fixture Input",
+                JOptionPane.PLAIN_MESSAGE,
+                null,
+                null,
+                "");
+        setLabelText(statusLabel, "input result=" + value);
     }
 
     JTabbedPane buildTabs() {
@@ -450,16 +689,18 @@ public final class SwingFixtureApp {
             dynamicHost.add(workloadDynamicNode());
             refresh(dynamicHost);
         }));
-        JPanel dynamicPanel = new JPanel(new BorderLayout());
-        dynamicPanel.add(dynamicHost, BorderLayout.CENTER);
-        dynamicPanel.add(dynamicButtons, BorderLayout.SOUTH);
+        // Named distinctly from the `dynamicPanel` field below: that one backs the
+        // unrelated "Dynamic" tab, and reusing the name here previously shadowed it.
+        JPanel workloadDynamicPanel = new JPanel(new BorderLayout());
+        workloadDynamicPanel.add(dynamicHost, BorderLayout.CENTER);
+        workloadDynamicPanel.add(dynamicButtons, BorderLayout.SOUTH);
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, listPanel, treePanel);
         split.setResizeWeight(0.5);
         JPanel panel = new JPanel(new BorderLayout(0, 8));
         panel.getAccessibleContext().setAccessibleName("fixture.tab_workloads");
         panel.add(split, BorderLayout.CENTER);
-        panel.add(dynamicPanel, BorderLayout.SOUTH);
+        panel.add(workloadDynamicPanel, BorderLayout.SOUTH);
         updateListStatus.run();
         updateTreeStatus.run();
         return panel;
@@ -661,7 +902,7 @@ public final class SwingFixtureApp {
             while (tableModel.getRowCount() > ROW_COUNT) {
                 tableModel.removeRow(tableModel.getRowCount() - 1);
             }
-            updateTableRowCount();
+            repaintTable();
         });
 
         JButton addExtraRow = new JButton("Add extra row");
@@ -670,7 +911,7 @@ public final class SwingFixtureApp {
             if (tableModel.getRowCount() == ROW_COUNT) {
                 tableModel.addRow(new Object[] {"100", "job-100", "alice", "Queued", "100%"});
             }
-            updateTableRowCount();
+            repaintTable();
         });
 
         JButton removeExtraRow = new JButton("Remove extra row");
@@ -679,7 +920,7 @@ public final class SwingFixtureApp {
             if (tableModel.getRowCount() > ROW_COUNT) {
                 tableModel.removeRow(tableModel.getRowCount() - 1);
             }
-            updateTableRowCount();
+            repaintTable();
         });
 
         JLabel rowCountStatus = new JLabel();
@@ -762,7 +1003,7 @@ public final class SwingFixtureApp {
         table.setColumnSelectionAllowed(true);
     }
 
-    private void updateTableRowCount() {
+    private void repaintTable() {
         table.revalidate();
         table.repaint();
     }
@@ -845,9 +1086,185 @@ public final class SwingFixtureApp {
         panel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         panel.add(scopes);
         panel.add(statePanel);
+        panel.add(buildValuePanel());
+        panel.add(buildTextAndRenderPanel());
+        panel.add(buildFocusPanel());
         panel.add(autoPanel);
         panel.setPreferredSize(new Dimension(560, 240));
         return panel;
+    }
+
+    /**
+     * {@code fixture.boundary_text_field}: {@code CHUNK_SIZE} in
+     * {@code backend.py}'s chunked {@code getAccessibleText} reads is
+     * {@code min(MAX_STRING_SIZE - 1, 32_766) == 1023} UTF-16 code units. A
+     * surrogate pair (two code units, one codepoint) placed so its high
+     * surrogate is the very last unit of the first chunk and its low surrogate
+     * is the very first unit of the second is the one arrangement most likely
+     * to corrupt a naive chunk-and-concatenate implementation - unit tests
+     * already prove this against {@code FakeBackend}/{@code StubDll}; this field
+     * is what lets an integration test prove it against the real DLL.
+     *
+     * <p>{@code fixture.custom_rendered_list}: a {@code JList} whose cells are
+     * rendered by a custom {@code ListCellRenderer} returning a differently
+     * styled {@code JLabel} per row, unlike every other list/table in this
+     * fixture which relies on the default renderer - proves accessible text
+     * resolution depends on the list model, not the (arbitrary) rendering
+     * component subtree the renderer happens to build.
+     */
+    private static JPanel buildTextAndRenderPanel() {
+        JTextField boundaryField = new JTextField(20);
+        boundaryField.setText(buildBoundaryStraddlingText());
+        boundaryField.setEditable(false);
+        boundaryField.getAccessibleContext().setAccessibleName("fixture.boundary_text_field");
+
+        JList<String> customRendered = new JList<>(
+                new String[] {"Alpha", "Beta", "Gamma"});
+        customRendered.getAccessibleContext().setAccessibleName("fixture.custom_rendered_list");
+        customRendered.setCellRenderer((list, value, index, isSelected, hasFocus) -> {
+            JLabel label = new JLabel("#" + index + ": " + value);
+            label.setOpaque(true);
+            label.setBackground(isSelected ? list.getSelectionBackground() : list.getBackground());
+            label.setForeground(isSelected ? list.getSelectionForeground() : list.getForeground());
+            return label;
+        });
+
+        JPanel textAndRender = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        textAndRender.getAccessibleContext().setAccessibleName("fixture.text_and_render_panel");
+        textAndRender.add(boundaryField);
+        textAndRender.add(customRendered);
+        return textAndRender;
+    }
+
+    private static String buildBoundaryStraddlingText() {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < 1022; i++) {
+            builder.append('a');
+        }
+        builder.appendCodePoint(0x1F680); // 🚀 - straddles the 1023-code-unit chunk boundary
+        for (int i = 0; i < 978; i++) {
+            builder.append('b');
+        }
+        return builder.toString();
+    }
+
+    /**
+     * Explicit, deliberately non-declaration-order {@code FocusTraversalPolicy}
+     * (C -&gt; A -&gt; B, not A -&gt; B -&gt; C) plus {@code fixture.focus_status}, a
+     * label reporting which button currently owns focus - matching how real
+     * client UIs often override default tab order, and giving a test a way to
+     * prove which component is focused without relying on OS-level "active
+     * window" state.
+     */
+    private static JPanel buildFocusPanel() {
+        JButton focusA = new JButton("A");
+        focusA.getAccessibleContext().setAccessibleName("fixture.focus_button_a");
+
+        JButton focusB = new JButton("B");
+        focusB.getAccessibleContext().setAccessibleName("fixture.focus_button_b");
+
+        JButton focusC = new JButton("C");
+        focusC.getAccessibleContext().setAccessibleName("fixture.focus_button_c");
+
+        JLabel focusStatus = new JLabel();
+        focusStatus.getAccessibleContext().setAccessibleName("fixture.focus_status");
+        setLabelText(focusStatus, "none");
+
+        FocusListener reportFocus = new FocusAdapter() {
+            @Override
+            public void focusGained(FocusEvent event) {
+                Component source = event.getComponent();
+                String name = source instanceof Accessible accessible
+                        ? accessible.getAccessibleContext().getAccessibleName()
+                        : "unknown";
+                setLabelText(focusStatus, name);
+            }
+        };
+        focusA.addFocusListener(reportFocus);
+        focusB.addFocusListener(reportFocus);
+        focusC.addFocusListener(reportFocus);
+
+        JPanel focusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        focusPanel.getAccessibleContext().setAccessibleName("fixture.focus_panel");
+        focusPanel.setFocusTraversalPolicyProvider(true);
+        focusPanel.setFocusTraversalPolicy(new FocusTraversalPolicy() {
+            @Override
+            public Component getComponentAfter(Container container, Component component) {
+                if (component == focusC) {
+                    return focusA;
+                }
+                if (component == focusA) {
+                    return focusB;
+                }
+                return focusC;
+            }
+
+            @Override
+            public Component getComponentBefore(Container container, Component component) {
+                if (component == focusA) {
+                    return focusC;
+                }
+                if (component == focusB) {
+                    return focusA;
+                }
+                return focusB;
+            }
+
+            @Override
+            public Component getFirstComponent(Container container) {
+                return focusC;
+            }
+
+            @Override
+            public Component getLastComponent(Container container) {
+                return focusB;
+            }
+
+            @Override
+            public Component getDefaultComponent(Container container) {
+                return focusC;
+            }
+        });
+        focusPanel.add(focusA);
+        focusPanel.add(focusB);
+        focusPanel.add(focusC);
+        focusPanel.add(focusStatus);
+        return focusPanel;
+    }
+
+    /**
+     * {@code JScrollBar} (in {@link #buildTableTab()}) is the only current carrier
+     * of {@code AccessibleValue} - {@code JProgressBar} and {@code JSlider}
+     * implement it too, through their own default {@code AccessibleContext}, with
+     * no extra wiring required.
+     *
+     * <p>{@code JSpinner} was deliberately left out: its JAB-reported role
+     * ("spinbox") is not in {@code play_jab.registry}'s role table, and
+     * {@code sync_api.py}'s tree walker snapshots every visited node
+     * unconditionally - an unrecognized role anywhere in a subtree aborts the
+     * *entire* walk with {@code UnsupportedAccessibleRoleError}, not just
+     * resolution of that one node. Since a {@code JTabbedPane} keeps every tab's
+     * content in the accessible tree regardless of which tab is selected, that
+     * would have broken every {@code get_by_name} call from the window root
+     * across the whole suite, not merely spinner-focused tests - confirmed
+     * empirically before this comment was written. Adding {@code JSpinner} back
+     * requires a library-side fix (registering "spinbox" and/or hardening the
+     * walker to skip unsupported roles instead of aborting), which is out of this
+     * testing-only plan's scope.
+     */
+    private static JPanel buildValuePanel() {
+        JProgressBar progressBar = new JProgressBar(0, 100);
+        progressBar.setValue(42);
+        progressBar.getAccessibleContext().setAccessibleName("fixture.progress_bar");
+
+        JSlider slider = new JSlider(0, 10, 3);
+        slider.getAccessibleContext().setAccessibleName("fixture.slider");
+
+        JPanel valuePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        valuePanel.getAccessibleContext().setAccessibleName("fixture.value_panel");
+        valuePanel.add(progressBar);
+        valuePanel.add(slider);
+        return valuePanel;
     }
 
     private static JPanel buildDuplicateScope(String name, String description) {

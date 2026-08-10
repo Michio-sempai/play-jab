@@ -53,6 +53,18 @@ import javax.swing.WindowConstants;
  */
 public final class JabDialogRepro {
 
+    // Window titles (for closing through Win32 WM_CLOSE when JAB is unavailable) -
+    // the exact contract test_modal_dialogs.py's raw-window helpers depend on.
+    // Package-private so SwingFixtureContractTest can assert against them
+    // directly instead of duplicating the literals (unit-tests-review.md /
+    // test-app-review.md finding B12).
+    static final String MAIN_TITLE = "JAB dialog repro";
+    static final String SCENARIO_A_TITLE = "Scenario A";
+    static final String SCENARIO_B_TITLE = "Scenario B";
+    static final String SCENARIO_C_TITLE = "Scenario C";
+    static final String SCENARIO_NESTED_TITLE = "Scenario Nested";
+    static final String SCENARIO_FIRST_TITLE = "Scenario First";
+
     public static void main(String[] args) {
         boolean dialogFirst = Boolean.getBoolean("dialog.first");
         SwingUtilities.invokeLater(() -> {
@@ -60,7 +72,7 @@ public final class JabDialogRepro {
                 // Диалог — самое первое top-level окно процесса, до
                 // JAB-опроса чего-либо ещё. Отдельная диагностика, не доказательство
                 // причины регрессии A/B.
-                showModalDialog(null, "Scenario First", "first");
+                showModalDialog(null, SCENARIO_FIRST_TITLE, "first");
                 return;
             }
             showMainFrame();
@@ -68,7 +80,7 @@ public final class JabDialogRepro {
     }
 
     private static void showMainFrame() {
-        JFrame frame = new JFrame("JAB dialog repro");
+        JFrame frame = new JFrame(MAIN_TITLE);
         frame.getAccessibleContext().setAccessibleName("repro.main");
         frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
@@ -84,7 +96,7 @@ public final class JabDialogRepro {
         JLabel status = createStatusLabel();
         openModeless.addActionListener(e -> showModelessDialog(frame, status));
         openModal.addActionListener(
-                e -> showModalDialog(frame, "Scenario B", "modal", false, status));
+                e -> showModalDialog(frame, SCENARIO_B_TITLE, "modal", false, status));
         openInvokeAndWait.addActionListener(
                 e -> showModalDialogViaInvokeAndWait(frame, status));
 
@@ -109,8 +121,12 @@ public final class JabDialogRepro {
      */
     private static void showModelessDialog(JFrame parent, JLabel status) {
         setStatus(status, "opening: Scenario A");
-        Window owner = SwingUtilities.getWindowAncestor(parent);
-        JDialog dialog = new JDialog(owner, "Scenario A", Dialog.ModalityType.MODELESS);
+        // `parent` is passed directly, not through `SwingUtilities.getWindowAncestor`:
+        // that call walks up from `parent.getParent()`, which is null for a top-level
+        // JFrame, so it silently returned null - the dialog ended up owned by AWT's
+        // hidden shared-owner frame instead of `repro.main`, breaking the "owner
+        // window also loses JAB access" contract this fixture exists to prove.
+        JDialog dialog = new JDialog(parent, SCENARIO_A_TITLE, Dialog.ModalityType.MODELESS);
         dialog.getAccessibleContext().setAccessibleName("repro.modeless.dialog");
         dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
         buildDialogContent(dialog, "repro.modeless");
@@ -129,7 +145,14 @@ public final class JabDialogRepro {
             }
         });
         dialog.setVisible(true); // вызвано уже внутри ActionListener (на EDT) — вложенный показ
-        loop.enter();            // блокирует до закрытия окна
+        boolean entered = loop.enter(); // блокирует до закрытия окна
+        if (!entered) {
+            // enter() returns false without blocking if the loop could not start
+            // (for example a nested loop is already active). Silently proceeding
+            // would defeat this fixture's entire purpose: it would return instead
+            // of reproducing the hang it exists to demonstrate.
+            setStatus(status, "error: SecondaryLoop.enter() returned false");
+        }
     }
 
     /**
@@ -187,7 +210,7 @@ public final class JabDialogRepro {
             try {
                 SwingUtilities.invokeAndWait(
                         () -> showModalDialog(
-                                parent, "Scenario C", "invokeandwait", true, status));
+                                parent, SCENARIO_C_TITLE, "invokeandwait", true, status));
             } catch (InterruptedException | InvocationTargetException e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
@@ -224,7 +247,7 @@ public final class JabDialogRepro {
                     .setAccessibleName("repro.invokeandwait.open_nested");
             openNested.addActionListener(
                     e -> showModalDialog(
-                            dialog, "Scenario Nested", "nested", false, status));
+                            dialog, SCENARIO_NESTED_TITLE, "nested", false, status));
             buttons.add(openNested);
         }
         buttons.add(ok);
