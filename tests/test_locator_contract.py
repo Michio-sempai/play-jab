@@ -27,6 +27,8 @@ BUTTON_COUNT = 3
 FIRST_EXISTS_ACQUISITIONS = 3
 FIRST_SNAPSHOT_ACQUISITIONS = 3
 SECOND_SNAPSHOT_ACQUISITIONS = 6
+HEAVY_SIBLING_LEVELS = 50
+BOUNDED_ACQUISITIONS_WITH_MAX_DEPTH = 3
 
 
 def _tree() -> FakeNode:
@@ -135,6 +137,36 @@ def test_role_state_visibility_and_index_filters_compose(
         window.locator(role="push button", visible_only=True).count() == DUPLICATE_COUNT
     )
     assert window.locator(role="push button", index_in_parent=1).count() == 1
+
+
+def test_max_depth_bounds_which_descendants_are_considered(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, _ = locator_api
+    assert window.locator(role="push button", max_depth=1).count() == 0
+    assert window.locator(role="push button", max_depth=2).count() == BUTTON_COUNT
+    assert window.locator(role="frame", max_depth=0).count() == 1
+    assert window.locator(role="push button", max_depth=0).count() == 0
+
+
+def test_max_depth_is_relative_to_a_chained_locators_own_parent(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, _ = locator_api
+    left = window.get_by_role("panel", name="Left")
+    assert left.get_by_name("Duplicate", max_depth=1).count() == 1
+
+
+def test_max_depth_is_validated_before_traversal(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, backend = locator_api
+    acquired = backend.acquired
+    with pytest.raises(ValueError):
+        window.locator(max_depth=-1)
+    with pytest.raises(ValueError):
+        window.locator(max_depth=True)
+    assert backend.acquired == acquired
 
 
 def test_showing_only_prunes_non_showing_subtrees_without_changing_visible_only(
@@ -551,6 +583,50 @@ def test_depth_limit_fails_deterministically_without_leaking_references(
         with pytest.raises(LocatorError, match="limit"):
             window.get_by_role("panel").count()
         assert backend.acquired == backend.released
+        assert runtime.live_ref_count == 0
+    finally:
+        api.close()
+
+
+def test_max_depth_skips_a_heavy_showing_sibling_before_a_shallow_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for depth-first-first-shallow-target: a deep, "showing"
+    subtree that sorts before a shallow target must not be fully walked when
+    the caller knows the target is shallow."""
+    heavy = FakeNode(
+        name="Heavy", role_en_us="panel", states_en_us="enabled,visible,showing"
+    )
+    current = heavy
+    for level in range(HEAVY_SIBLING_LEVELS):
+        child = FakeNode(
+            name=f"heavy-{level}",
+            role_en_us="panel",
+            states_en_us="enabled,visible,showing",
+        )
+        current.children.append(child)
+        current = child
+    root = FakeNode(
+        name="root",
+        role_en_us="frame",
+        states_en_us="enabled,visible,showing",
+        children=[
+            heavy,
+            FakeNode(
+                name="Target",
+                role_en_us="toggle button",
+                states_en_us="enabled,visible,showing",
+            ),
+        ],
+    )
+    backend = FakeBackend({HWND: root})
+    api, window, runtime = _window_for_backend(monkeypatch, backend)
+    try:
+        acquired = backend.acquired
+        assert window.locator(role="toggle button", max_depth=1).count() == 1
+        # Bounded: only root's two direct children are opened - the 50-level
+        # chain under the showing "Heavy" sibling is never descended into.
+        assert backend.acquired - acquired == BOUNDED_ACQUISITIONS_WITH_MAX_DEPTH
         assert runtime.live_ref_count == 0
     finally:
         api.close()

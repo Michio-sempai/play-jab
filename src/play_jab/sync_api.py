@@ -790,6 +790,7 @@ class _Query:
     index_in_parent: int | None = None
     visible_only: bool = False
     showing_only: bool = False
+    max_depth: int | None = None
 
     def matches(self, snapshot: ElementSnapshot) -> bool:
         return (
@@ -843,6 +844,7 @@ class JavaWindow:
         index_in_parent: int | None = None,
         visible_only: bool = False,
         showing_only: bool = False,
+        max_depth: int | None = None,
     ) -> Locator:
         query = _make_query(
             self._api._registry,
@@ -853,14 +855,23 @@ class JavaWindow:
             index_in_parent,
             visible_only,
             showing_only,
+            max_depth,
         )
         return Locator(self, (_Step(query),))
 
-    def get_by_role(self, role: str, *, name: TextMatcher | None = None) -> Locator:
-        return self.locator(role=role, name=name)
+    def get_by_role(
+        self,
+        role: str,
+        *,
+        name: TextMatcher | None = None,
+        max_depth: int | None = None,
+    ) -> Locator:
+        return self.locator(role=role, name=name, max_depth=max_depth)
 
-    def get_by_name(self, name: TextMatcher) -> Locator:
-        return self.locator(name=name)
+    def get_by_name(
+        self, name: TextMatcher, *, max_depth: int | None = None
+    ) -> Locator:
+        return self.locator(name=name, max_depth=max_depth)
 
     def snapshot(self) -> ElementSnapshot:
         """Read the top-level window context without traversing descendants."""
@@ -958,6 +969,7 @@ def _make_query(  # noqa: PLR0913, PLR0917
     index_in_parent: int | None,
     visible_only: bool,
     showing_only: bool,
+    max_depth: int | None,
 ) -> _Query:
     if role is not None:
         if not isinstance(role, str):
@@ -973,6 +985,10 @@ def _make_query(  # noqa: PLR0913, PLR0917
         raise ValueError("visible_only must be a bool")
     if not isinstance(showing_only, bool):
         raise ValueError("showing_only must be a bool")
+    if max_depth is not None and (
+        isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 0
+    ):
+        raise ValueError("max_depth must be a non-negative integer")
     state_values = (
         () if states is None else ((states,) if isinstance(states, str) else states)
     )
@@ -985,6 +1001,7 @@ def _make_query(  # noqa: PLR0913, PLR0917
         index_in_parent=index_in_parent,
         visible_only=visible_only,
         showing_only=showing_only,
+        max_depth=max_depth,
     )
 
 
@@ -1028,6 +1045,7 @@ class Locator:
         index_in_parent: int | None = None,
         visible_only: bool = False,
         showing_only: bool = False,
+        max_depth: int | None = None,
     ) -> Locator:
         query = _make_query(
             self._window._api._registry,
@@ -1038,14 +1056,23 @@ class Locator:
             index_in_parent,
             visible_only,
             showing_only,
+            max_depth,
         )
         return Locator(self._window, (*self._chain, _Step(query)))
 
-    def get_by_role(self, role: str, *, name: TextMatcher | None = None) -> Locator:
-        return self.locator(role=role, name=name)
+    def get_by_role(
+        self,
+        role: str,
+        *,
+        name: TextMatcher | None = None,
+        max_depth: int | None = None,
+    ) -> Locator:
+        return self.locator(role=role, name=name, max_depth=max_depth)
 
-    def get_by_name(self, name: TextMatcher) -> Locator:
-        return self.locator(name=name)
+    def get_by_name(
+        self, name: TextMatcher, *, max_depth: int | None = None
+    ) -> Locator:
+        return self.locator(name=name, max_depth=max_depth)
 
     def first(self) -> Locator:
         return self._with_position(0)
@@ -1790,6 +1817,8 @@ class Locator:
             matches.append(_Match(path, _snapshot(info, self._window._api._registry)))
             if match_limit is not None and len(matches) >= match_limit:
                 return True
+        if query.max_depth is not None and depth >= query.max_depth:
+            return False
         visible = (
             self._window._api._bridge.visible_children(ref)
             if "manages descendants" in raw_snapshot.states

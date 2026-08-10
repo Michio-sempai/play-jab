@@ -71,6 +71,7 @@ def test_the_public_types_are_exported_from_sync_api() -> None:
         "index_in_parent",
         "visible_only",
         "showing_only",
+        "max_depth",
     )
     assert _parameters(JavaWindow.snapshot) == ("self",)
     assert _parameters(Locator.exists) == ("self",)
