@@ -273,11 +273,13 @@ def test_starting_a_closed_runtime_is_refused() -> None:
 def test_close_cannot_join_the_worker_before_thread_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Captured before the monkeypatch below replaces the shared `threading.Thread`
+    # attribute process-wide, so the test's own driver threads stay real threads.
     real_thread = threading.Thread
     entered_start = threading.Event()
     allow_start = threading.Event()
 
-    class DelayedStartThread(real_thread):
+    class DelayedStartThread(threading.Thread):
         def start(self) -> None:
             entered_start.set()
             assert allow_start.wait(UNBLOCK_TIMEOUT)

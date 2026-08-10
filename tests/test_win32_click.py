@@ -13,53 +13,17 @@ from play_jab._native.fake import FakeBackend, FakeNode
 from play_jab.exceptions import LocatorError
 from play_jab.sync_api import JavaWindow, PlayJab
 
+from .conftest import FakeWindowBackend
+
 PID = 4242
 HWND = 0xCAFE
 CLICK_COUNT = 2
 
 
-class _InputWindows:
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, ...]] = []
-        self.cursor = (700, 800)
-        self.previous_dpi = 123
-        self.send_error: BaseException | None = None
-
-    def enum_windows(self) -> list[int]:
-        return [HWND]
-
-    def get_window_title(self, hwnd: int) -> str:
-        assert hwnd == HWND
-        return "Fixture"
-
-    def get_window_pid(self, hwnd: int) -> int:
-        assert hwnd == HWND
-        return PID
-
-    def set_foreground_window(self, hwnd: int) -> None:
-        self.calls.append(("foreground", hwnd))
-
-    def get_cursor_position(self) -> tuple[int, int]:
-        self.calls.append(("get_cursor",))
-        return self.cursor
-
-    def set_cursor_position(self, x: int, y: int) -> None:
-        self.calls.append(("set_cursor", x, y))
-
-    def set_thread_dpi_awareness_context(self, context: int) -> int:
-        self.calls.append(("dpi", context))
-        return self.previous_dpi
-
-    def send_left_click(self) -> None:
-        self.calls.append(("click",))
-        if self.send_error is not None:
-            raise self.send_error
-
-
 @pytest.fixture
 def mouse_api(
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, _InputWindows]]:
+) -> Iterator[tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, FakeWindowBackend]]:
     target = FakeNode(
         name="Open",
         role_en_us="push button",
@@ -80,7 +44,9 @@ def mouse_api(
         }
     )
     runtime = BridgeRuntime(lambda: backend)
-    windows = _InputWindows()
+    windows = FakeWindowBackend(
+        {HWND: "Fixture"}, pid=PID, cursor=(700, 800), dpi_context=123
+    )
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
     monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
@@ -93,7 +59,7 @@ def mouse_api(
 
 
 def test_opens_window_click_uses_fresh_center_and_restores_cursor_and_dpi(
-    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, _InputWindows],
+    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, FakeWindowBackend],
 ) -> None:
     api, window, backend, target, windows = mouse_api
     locator = window.get_by_name("Open")
@@ -116,7 +82,7 @@ def test_opens_window_click_uses_fresh_center_and_restores_cursor_and_dpi(
 
 
 def test_mouse_click_restores_cursor_and_dpi_when_input_raises(
-    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, _InputWindows],
+    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, FakeWindowBackend],
 ) -> None:
     api, window, _, _, windows = mouse_api
     windows.send_error = OSError("SendInput failed")
@@ -129,7 +95,7 @@ def test_mouse_click_restores_cursor_and_dpi_when_input_raises(
 
 
 def test_mouse_click_rejects_empty_bounds_before_touching_win32(
-    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, _InputWindows],
+    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, FakeWindowBackend],
 ) -> None:
     _, window, _, target, windows = mouse_api
     target.width = 0
@@ -139,7 +105,7 @@ def test_mouse_click_rejects_empty_bounds_before_touching_win32(
 
 
 def test_click_requires_a_real_boolean_mode(
-    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, _InputWindows],
+    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, FakeWindowBackend],
 ) -> None:
     _, window, _, _, _ = mouse_api
     with pytest.raises(ValueError, match="opens_window"):
@@ -147,7 +113,7 @@ def test_click_requires_a_real_boolean_mode(
 
 
 def test_synthetic_input_is_serialized_across_callers(
-    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, _InputWindows],
+    mouse_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeNode, FakeWindowBackend],
 ) -> None:
     _, window, _, _, windows = mouse_api
     first_inside = threading.Event()

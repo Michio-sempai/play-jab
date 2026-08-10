@@ -3,8 +3,9 @@
 Without an explicit ``argtypes`` ctypes falls back to its default conversions:
 a Python ``int`` becomes a C ``int``, so a 64-bit ``AccessibleContext`` cookie
 would be truncated and a pointer-sized ``HWND`` mangled, silently, on the call
-that happens to be misconfigured. Every export therefore gets its own assertion
-rather than a "the symbol exists" check.
+that happens to be misconfigured. Every export therefore gets its own named
+assertion, driven by :data:`EXPECTED_SIGNATURES`, rather than a "the symbol
+exists" or "it has *some* explicit type" check.
 """
 
 from __future__ import annotations
@@ -15,7 +16,14 @@ from typing import cast
 
 import pytest
 
-from play_jab._native.functions import REQUIRED_EXPORTS, configure_functions
+from play_jab._native.functions import (
+    JAVA_SHUTDOWN_CALLBACK,
+    PROPERTY_CALLBACK,
+    PROPERTY_CHANGE_CALLBACK,
+    PROPERTY_SIMPLE_CALLBACK,
+    REQUIRED_EXPORTS,
+    configure_functions,
+)
 from play_jab._native.types import (
     BOOL,
     HWND,
@@ -23,12 +31,123 @@ from play_jab._native.types import (
     AccessibleActionsToDo,
     AccessibleContext,
     AccessibleContextInfo,
+    AccessibleTableCellInfo,
+    AccessibleTableInfo,
+    AccessibleTextInfo,
     JavaObject,
+    VisibleChildrenInfo,
     jint,
 )
 
 _VM_ID = ctypes.c_long
 _WINDOWS_LONG_SIZE = 4
+
+_SELECTION_ARGS: list[type] = [_VM_ID, AccessibleContext, ctypes.c_int]
+_TABLE_INFO_ARGS: list[type] = [
+    _VM_ID,
+    AccessibleContext,
+    ctypes.POINTER(AccessibleTableInfo),
+]
+_TABLE_VALUE_ARGS: list[type] = [_VM_ID, JavaObject, jint, ctypes.POINTER(jint)]
+
+# Mirrors `configure_functions` in `src/play_jab/_native/functions.py`
+# one-to-one: every entry here is the ABI contract that module promises for
+# one export. `test_every_export_matches_its_declared_signature` fails loudly
+# if the two ever drift apart.
+EXPECTED_SIGNATURES: dict[str, tuple[list[type], type | None]] = {
+    "Windows_run": ([], None),
+    "isJavaWindow": ([HWND], BOOL),
+    "getAccessibleContextFromHWND": (
+        [HWND, ctypes.POINTER(_VM_ID), ctypes.POINTER(AccessibleContext)],
+        BOOL,
+    ),
+    "getAccessibleContextInfo": (
+        [_VM_ID, AccessibleContext, ctypes.POINTER(AccessibleContextInfo)],
+        BOOL,
+    ),
+    "getAccessibleChildFromContext": (
+        [_VM_ID, AccessibleContext, jint],
+        AccessibleContext,
+    ),
+    "getAccessibleParentFromContext": ([_VM_ID, AccessibleContext], AccessibleContext),
+    "releaseJavaObject": ([_VM_ID, JavaObject], None),
+    "getHWNDFromAccessibleContext": ([_VM_ID, AccessibleContext], HWND),
+    "getAccessibleActions": (
+        [_VM_ID, AccessibleContext, ctypes.POINTER(AccessibleActions)],
+        BOOL,
+    ),
+    "doAccessibleActions": (
+        [
+            _VM_ID,
+            AccessibleContext,
+            ctypes.POINTER(AccessibleActionsToDo),
+            ctypes.POINTER(jint),
+        ],
+        BOOL,
+    ),
+    "getAccessibleTextInfo": (
+        [_VM_ID, AccessibleContext, ctypes.POINTER(AccessibleTextInfo), jint, jint],
+        BOOL,
+    ),
+    "getAccessibleTextRange": (
+        [
+            _VM_ID,
+            AccessibleContext,
+            jint,
+            jint,
+            ctypes.POINTER(ctypes.c_wchar),
+            ctypes.c_short,
+        ],
+        BOOL,
+    ),
+    "getCurrentAccessibleValueFromContext": (
+        [_VM_ID, AccessibleContext, ctypes.POINTER(ctypes.c_wchar), ctypes.c_short],
+        BOOL,
+    ),
+    "getMinimumAccessibleValueFromContext": (
+        [_VM_ID, AccessibleContext, ctypes.POINTER(ctypes.c_wchar), ctypes.c_short],
+        BOOL,
+    ),
+    "getMaximumAccessibleValueFromContext": (
+        [_VM_ID, AccessibleContext, ctypes.POINTER(ctypes.c_wchar), ctypes.c_short],
+        BOOL,
+    ),
+    "setTextContents": ([_VM_ID, AccessibleContext, ctypes.c_wchar_p], BOOL),
+    "requestFocus": ([_VM_ID, AccessibleContext], BOOL),
+    "addAccessibleSelectionFromContext": (_SELECTION_ARGS, None),
+    "clearAccessibleSelectionFromContext": ([_VM_ID, AccessibleContext], None),
+    "getAccessibleSelectionFromContext": (_SELECTION_ARGS, JavaObject),
+    "getAccessibleSelectionCountFromContext": (
+        [_VM_ID, AccessibleContext],
+        ctypes.c_int,
+    ),
+    "isAccessibleChildSelectedFromContext": (_SELECTION_ARGS, BOOL),
+    "removeAccessibleSelectionFromContext": (_SELECTION_ARGS, None),
+    "getAccessibleTableInfo": (_TABLE_INFO_ARGS, BOOL),
+    "getAccessibleTableRowHeader": (_TABLE_INFO_ARGS, BOOL),
+    "getAccessibleTableColumnHeader": (_TABLE_INFO_ARGS, BOOL),
+    "getAccessibleTableCellInfo": (
+        [_VM_ID, JavaObject, jint, jint, ctypes.POINTER(AccessibleTableCellInfo)],
+        BOOL,
+    ),
+    "getAccessibleTableRowSelectionCount": ([_VM_ID, JavaObject], jint),
+    "getAccessibleTableColumnSelectionCount": ([_VM_ID, JavaObject], jint),
+    "getAccessibleTableRowSelections": (_TABLE_VALUE_ARGS, BOOL),
+    "getAccessibleTableColumnSelections": (_TABLE_VALUE_ARGS, BOOL),
+    "getVisibleChildrenCount": ([_VM_ID, AccessibleContext], ctypes.c_int),
+    "getVisibleChildren": (
+        [_VM_ID, AccessibleContext, ctypes.c_int, ctypes.POINTER(VisibleChildrenInfo)],
+        BOOL,
+    ),
+    "setJavaShutdownFP": ([JAVA_SHUTDOWN_CALLBACK], None),
+    "setPropertyChangeFP": ([PROPERTY_CHANGE_CALLBACK], None),
+    "setPropertyStateChangeFP": ([PROPERTY_CALLBACK], None),
+    "setPropertyValueChangeFP": ([PROPERTY_CALLBACK], None),
+    "setPropertyTableModelChangeFP": ([PROPERTY_CALLBACK], None),
+    "setPropertyTextChangeFP": ([PROPERTY_SIMPLE_CALLBACK], None),
+    "setPropertySelectionChangeFP": ([PROPERTY_SIMPLE_CALLBACK], None),
+    "setPropertyVisibleDataChangeFP": ([PROPERTY_SIMPLE_CALLBACK], None),
+}
 
 
 class _Export:
@@ -56,80 +175,20 @@ def configured() -> _StubDll:
     return stub
 
 
-def signature_of(stub: _StubDll, name: str) -> tuple[list[type] | None, type | None]:
-    export = stub.exports[name]
-    return export.argtypes, export.restype
-
-
-def test_windows_run(configured: _StubDll) -> None:
-    assert signature_of(configured, "Windows_run") == ([], None)
-
-
-def test_is_java_window(configured: _StubDll) -> None:
-    assert signature_of(configured, "isJavaWindow") == ([HWND], BOOL)
-
-
-def test_get_accessible_context_from_hwnd(configured: _StubDll) -> None:
-    expected = [HWND, ctypes.POINTER(_VM_ID), ctypes.POINTER(AccessibleContext)]
-    assert signature_of(configured, "getAccessibleContextFromHWND") == (expected, BOOL)
-
-
-def test_get_accessible_context_info(configured: _StubDll) -> None:
-    expected = [_VM_ID, AccessibleContext, ctypes.POINTER(AccessibleContextInfo)]
-    assert signature_of(configured, "getAccessibleContextInfo") == (expected, BOOL)
-
-
-def test_get_accessible_child_from_context(configured: _StubDll) -> None:
-    expected = [_VM_ID, AccessibleContext, jint]
-    assert signature_of(configured, "getAccessibleChildFromContext") == (
-        expected,
-        AccessibleContext,
-    )
-
-
-def test_get_accessible_parent_from_context(configured: _StubDll) -> None:
-    assert signature_of(configured, "getAccessibleParentFromContext") == (
-        [_VM_ID, AccessibleContext],
-        AccessibleContext,
-    )
-
-
-def test_release_java_object(configured: _StubDll) -> None:
-    assert signature_of(configured, "releaseJavaObject") == ([_VM_ID, JavaObject], None)
-
-
-def test_get_hwnd_from_accessible_context(configured: _StubDll) -> None:
-    assert signature_of(configured, "getHWNDFromAccessibleContext") == (
-        [_VM_ID, AccessibleContext],
-        HWND,
-    )
-
-
-def test_get_accessible_actions(configured: _StubDll) -> None:
-    expected = [_VM_ID, AccessibleContext, ctypes.POINTER(AccessibleActions)]
-    assert signature_of(configured, "getAccessibleActions") == (expected, BOOL)
-
-
-def test_do_accessible_actions(configured: _StubDll) -> None:
-    expected = [
-        _VM_ID,
-        AccessibleContext,
-        ctypes.POINTER(AccessibleActionsToDo),
-        ctypes.POINTER(jint),
-    ]
-    assert signature_of(configured, "doAccessibleActions") == (expected, BOOL)
-
-
-def test_every_required_export_is_configured(configured: _StubDll) -> None:
-    """A required export left unconfigured would use ctypes' default marshalling."""
-    assert set(configured.exports) == set(REQUIRED_EXPORTS)
+def test_expected_signatures_cover_every_required_export() -> None:
+    """The table above must track `REQUIRED_EXPORTS`, not fall behind it."""
+    assert set(EXPECTED_SIGNATURES) == set(REQUIRED_EXPORTS)
     assert len(REQUIRED_EXPORTS) == len(set(REQUIRED_EXPORTS))
 
 
-def test_no_export_keeps_the_default_int_restype(configured: _StubDll) -> None:
-    for name, export in configured.exports.items():
-        assert export.restype is not object, f"{name} has no explicit restype"
-        assert export.argtypes is not None, f"{name} has no explicit argtypes"
+@pytest.mark.parametrize("name", sorted(EXPECTED_SIGNATURES))
+def test_every_export_matches_its_declared_signature(
+    configured: _StubDll, name: str
+) -> None:
+    export = configured.exports[name]
+    expected_argtypes, expected_restype = EXPECTED_SIGNATURES[name]
+    assert export.argtypes == expected_argtypes, f"{name} argtypes mismatch"
+    assert export.restype == expected_restype, f"{name} restype mismatch"
 
 
 def test_cookie_carrying_types_are_64_bit() -> None:

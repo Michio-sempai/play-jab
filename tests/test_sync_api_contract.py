@@ -8,6 +8,8 @@ and replace the three module factories with deterministic fakes.
 from __future__ import annotations
 
 import inspect
+import typing
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -35,7 +37,7 @@ from play_jab.sync_api import (
 )
 
 
-def _parameters(callable_object: object) -> tuple[str, ...]:
+def _parameters(callable_object: Callable[..., object]) -> tuple[str, ...]:
     return tuple(inspect.signature(callable_object).parameters)
 
 
@@ -105,26 +107,38 @@ def test_snapshot_and_diagnostic_tree_are_immutable_value_objects() -> None:
     assert inspect.isclass(AccessibilityNode)
     assert "__dataclass_fields__" in vars(ElementSnapshot)
     assert "__dataclass_fields__" in vars(AccessibilityNode)
-    snapshot_params = inspect.signature(ElementSnapshot).parameters
-    values = {
+    snapshot_params = inspect.signature(ElementSnapshot, eval_str=True).parameters
+    values: dict[str, object] = {
         name: _sample_value(parameter.annotation)
         for name, parameter in snapshot_params.items()
     }
-    snapshot = ElementSnapshot(**values)
+    snapshot = ElementSnapshot(**values)  # type: ignore[arg-type]
     field = next(iter(snapshot_params))
     with pytest.raises(FrozenInstanceError):
         setattr(snapshot, field, getattr(snapshot, field))
 
 
 def _sample_value(annotation: object) -> object:
-    """Produce a harmless value solely for the frozen-dataclass contract."""
-    rendered = str(annotation)
-    if "bool" in rendered:
-        return False
-    if "int" in rendered:
-        return 0
-    if "tuple" in rendered:
+    """Produce a harmless value solely for the frozen-dataclass contract.
+
+    Resolved against the real annotation object (``eval_str=True`` above),
+    not its string spelling, so a future field like ``list[bool]`` cannot be
+    mistaken for ``bool`` the way a substring match on ``str(annotation)``
+    would (see unit-tests-review.md finding B-7).
+    """
+    origin = typing.get_origin(annotation)
+    if origin is frozenset:
+        return frozenset()
+    if origin is tuple:
         return ()
-    if "None" in rendered and "str" not in rendered:
+    if annotation is bool:
+        return False
+    if annotation is int:
+        return 0
+    if annotation is str:
+        return ""
+    if annotation is type(None):
         return None
-    return ""
+    raise AssertionError(
+        f"add a sample value for ElementSnapshot annotation {annotation!r}"
+    )

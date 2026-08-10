@@ -97,11 +97,11 @@ def header_members(text: str) -> list[tuple[str, str, str | None]]:
     if body is None:
         pytest.fail(f"{_STRUCT_TAG} not found in {_HEADER}")
     declarations = re.sub(r"//[^\n]*", "", body.group(1))
-    members = []
+    members: list[tuple[str, str, str | None]] = []
     for chunk in declarations.split(";"):
         matched = re.fullmatch(r"\s*(\w+)\s+(\w+)\s*(?:\[\s*(\w+)\s*\])?\s*", chunk)
         if matched is not None:
-            members.append(matched.groups())
+            members.append(matched.groups())  # type: ignore[arg-type]
     return members
 
 

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 import pytest
 
-from play_jab import sync_api
 from play_jab._native.bridge import BridgeRuntime
 from play_jab._native.fake import FakeBackend, FakeNode
 from play_jab.exceptions import (
@@ -17,24 +17,13 @@ from play_jab.exceptions import (
 )
 from play_jab.sync_api import JavaWindow, PlayJab, contains
 
+from .conftest import FakeWindowBackend, install_fake_runtime
+
 PID = 4242
 HWND = 0xCAFE
 SECRET = "hunter2-secret"
 DUPLICATE_COUNT = 2
 BUTTON_COUNT = 3
-
-
-class _Windows:
-    def enum_windows(self) -> list[int]:
-        return [HWND]
-
-    def get_window_title(self, hwnd: int) -> str:
-        assert hwnd == HWND
-        return "Fixture"
-
-    def get_window_pid(self, hwnd: int) -> int:
-        assert hwnd == HWND
-        return PID
 
 
 def _tree() -> FakeNode:
@@ -93,12 +82,14 @@ def _tree() -> FakeNode:
 @pytest.fixture
 def locator_api(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend]:
+) -> Iterator[tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend]]:
     backend = FakeBackend({HWND: _tree()})
-    runtime = BridgeRuntime(lambda: backend)
-    monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
-    monkeypatch.setattr(sync_api, "_create_window_backend", _Windows)
-    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
+    runtime = install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
     api = PlayJab(timeout=0)
     api.__enter__()
     window = api.attach(pid=PID).window()
@@ -310,7 +301,9 @@ def test_accessibility_tree_honours_diagnostic_limits(
 ) -> None:
     _, window, runtime, backend = locator_api
     tree = window.accessibility_tree(max_depth=1, max_nodes=2)
-    assert len(tree.children) <= 1
+    # max_nodes=2 covers the root itself plus exactly one child - a bound of
+    # `<= 1` would also pass for a broken traversal that returned no children.
+    assert len(tree.children) == 1
     assert runtime.live_ref_count == 0
     assert backend.live_cookies == frozenset()
     with pytest.raises(ValueError):
@@ -430,10 +423,12 @@ def _window_for_backend(
     monkeypatch: pytest.MonkeyPatch,
     backend: FakeBackend,
 ) -> tuple[PlayJab, JavaWindow, BridgeRuntime]:
-    runtime = BridgeRuntime(lambda: backend)
-    monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
-    monkeypatch.setattr(sync_api, "_create_window_backend", _Windows)
-    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
+    runtime = install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
     api = PlayJab(timeout=0)
     api.__enter__()
     return api, api.attach(pid=PID).window(), runtime

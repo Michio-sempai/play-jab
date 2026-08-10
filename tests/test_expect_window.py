@@ -13,8 +13,11 @@ from play_jab.exceptions import (
     JavaWindowAmbiguousError,
     JavaWindowNotAccessibleError,
     JavaWindowNotFoundError,
+    UnsupportedActionError,
 )
 from play_jab.sync_api import JavaApplication, PlayJab, WindowExpectation
+
+from .conftest import FakeWindowBackend
 
 PID = 4242
 OWNER = 0x100
@@ -30,45 +33,11 @@ class _Processes:
         return pid == PID and self.alive
 
 
-class _Windows:
-    def __init__(self) -> None:
-        self.visible = [OWNER]
-        self.titles = {
-            OWNER: "Owner",
-            DIALOG: "Expected",
-            OTHER_DIALOG: "Other",
-        }
-
-    def enum_windows(self) -> list[int]:
-        return list(self.visible)
-
-    def get_window_title(self, hwnd: int) -> str:
-        return self.titles[hwnd]
-
-    def get_window_pid(self, hwnd: int) -> int:
-        return PID
-
-    def set_foreground_window(self, hwnd: int) -> None:
-        raise AssertionError("input is outside these tests")
-
-    def get_cursor_position(self) -> tuple[int, int]:
-        raise AssertionError("input is outside these tests")
-
-    def set_cursor_position(self, x: int, y: int) -> None:
-        raise AssertionError("input is outside these tests")
-
-    def set_thread_dpi_awareness_context(self, context: int) -> int:
-        raise AssertionError("input is outside these tests")
-
-    def send_left_click(self) -> None:
-        raise AssertionError("input is outside these tests")
-
-
 def _application(
     monkeypatch: pytest.MonkeyPatch,
     *,
     accessible: tuple[int, ...] = (OWNER, DIALOG, OTHER_DIALOG),
-) -> tuple[PlayJab, JavaApplication, _Windows, _Processes]:
+) -> tuple[PlayJab, JavaApplication, FakeWindowBackend, _Processes]:
     nodes = {
         hwnd: FakeNode(
             name=f"window-{hwnd}",
@@ -78,7 +47,12 @@ def _application(
         for hwnd in accessible
     }
     runtime = BridgeRuntime(lambda: FakeBackend(nodes))
-    windows = _Windows()
+    windows = FakeWindowBackend(
+        {OWNER: "Owner", DIALOG: "Expected", OTHER_DIALOG: "Other"},
+        pid=PID,
+        visible=[OWNER],
+        guard_input=True,
+    )
     processes = _Processes()
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
@@ -171,4 +145,4 @@ def test_expect_window_reports_process_exit_and_preserves_body_exception(
 
 def test_window_expectation_and_error_are_exported_from_package_root() -> None:
     assert play_jab.WindowExpectation is WindowExpectation
-    assert play_jab.UnsupportedActionError is sync_api.UnsupportedActionError
+    assert play_jab.UnsupportedActionError is UnsupportedActionError

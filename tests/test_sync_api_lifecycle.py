@@ -14,29 +14,13 @@ from play_jab.exceptions import (
 )
 from play_jab.sync_api import PlayJab
 
+from .conftest import FakeWindowBackend
+
 PID = 4321
 OTHER_PID = 9876
 HWND = 0x1234
 SECOND_HWND = 0x5678
 OTHER_HWND = 0x9999
-
-
-class FakeWindows:
-    def __init__(self) -> None:
-        self.windows: list[int] = [HWND, OTHER_HWND]
-        self.titles = {HWND: "Main", SECOND_HWND: "Second", OTHER_HWND: "Main"}
-        self.pids = {HWND: PID, SECOND_HWND: PID, OTHER_HWND: OTHER_PID}
-        self.calls = 0
-
-    def enum_windows(self) -> list[int]:
-        self.calls += 1
-        return list(self.windows)
-
-    def get_window_title(self, hwnd: int) -> str:
-        return self.titles[hwnd]
-
-    def get_window_pid(self, hwnd: int) -> int:
-        return self.pids[hwnd]
 
 
 class FakeProcesses:
@@ -50,7 +34,7 @@ class FakeProcesses:
 @pytest.fixture
 def api_backends(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses]:
+) -> tuple[PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses]:
     roots = {
         HWND: FakeNode(name="Main", role_en_us="frame", states_en_us="visible"),
         SECOND_HWND: FakeNode(
@@ -60,7 +44,11 @@ def api_backends(
     }
     backend = FakeBackend(roots)
     runtime = BridgeRuntime(lambda: backend)
-    windows = FakeWindows()
+    windows = FakeWindowBackend(
+        {HWND: "Main", SECOND_HWND: "Second", OTHER_HWND: "Main"},
+        pids={HWND: PID, SECOND_HWND: PID, OTHER_HWND: OTHER_PID},
+        visible=[HWND, OTHER_HWND],
+    )
     processes = FakeProcesses()
     monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
     monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
@@ -70,7 +58,7 @@ def api_backends(
 
 def test_context_manager_owns_one_runtime_and_close_is_idempotent(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, runtime, backend, _, _ = api_backends
@@ -87,7 +75,7 @@ def test_context_manager_owns_one_runtime_and_close_is_idempotent(
 
 def test_attach_requires_exactly_one_selector_before_discovery(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, _, _, windows, _ = api_backends
@@ -98,8 +86,8 @@ def test_attach_requires_exactly_one_selector_before_discovery(
             {"pid": PID, "title": "Main"},
         ):
             with pytest.raises(ValueError):
-                api.attach(**arguments)  # type: ignore[arg-type]
-    assert windows.calls == 0
+                api.attach(**arguments)
+    assert windows.enum_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -115,7 +103,7 @@ def test_attach_requires_exactly_one_selector_before_discovery(
 )
 def test_attach_rejects_invalid_values_before_native_calls(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
     arguments: dict[str, object],
     invalid: str,
@@ -123,12 +111,12 @@ def test_attach_rejects_invalid_values_before_native_calls(
     api, _, _, windows, _ = api_backends
     with api, pytest.raises(ValueError, match=invalid):
         api.attach(**arguments)  # type: ignore[arg-type]
-    assert windows.calls == 0
+    assert windows.enum_calls == 0
 
 
 def test_attach_and_window_discovery_are_pid_scoped_and_title_exact(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, _, _, windows, _ = api_backends
@@ -139,14 +127,14 @@ def test_attach_and_window_discovery_are_pid_scoped_and_title_exact(
         with pytest.raises(JavaWindowNotFoundError):
             application.window(title="main", timeout=0)
 
-        windows.windows.append(SECOND_HWND)
+        windows.visible.append(SECOND_HWND)
         with pytest.raises(JavaWindowAmbiguousError):
             application.window(timeout=0)
 
 
 def test_attach_by_title_is_globally_strict(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, _, _, _, _ = api_backends
@@ -156,7 +144,7 @@ def test_attach_by_title_is_globally_strict(
 
 def test_window_hwnd_must_belong_to_the_application_pid(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, _, _, _, _ = api_backends
@@ -168,17 +156,17 @@ def test_window_hwnd_must_belong_to_the_application_pid(
 
 def test_dead_process_is_reported_before_window_lookup(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, _, _, windows, processes = api_backends
     with api:
         application = api.attach(pid=PID)
         processes.alive.remove(PID)
-        before = windows.calls
+        before = windows.enum_calls
         with pytest.raises(JavaProcessExitedError):
             application.window(timeout=0)
-        assert windows.calls == before
+        assert windows.enum_calls == before
 
 
 @pytest.mark.parametrize("timeout", [-1, 1.5, True])
@@ -197,7 +185,7 @@ def test_constructor_validates_timeout_before_creating_native_backends(
 
 def test_window_selector_validation_precedes_window_enumeration(
     api_backends: tuple[
-        PlayJab, BridgeRuntime, FakeBackend, FakeWindows, FakeProcesses
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
     ],
 ) -> None:
     api, _, _, windows, _ = api_backends
@@ -209,7 +197,7 @@ def test_window_selector_validation_precedes_window_enumeration(
             {"title": ""},
             {"timeout": -1},
         ):
-            before = windows.calls
+            before = windows.enum_calls
             with pytest.raises(ValueError):
-                application.window(**arguments)  # type: ignore[arg-type]
-            assert windows.calls == before
+                application.window(**arguments)
+            assert windows.enum_calls == before
