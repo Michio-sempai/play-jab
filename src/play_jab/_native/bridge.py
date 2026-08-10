@@ -559,15 +559,6 @@ class BridgeRuntime:
 
         return self._call(operation)
 
-    def accessible_value(self, ref: JavaRef) -> str | None:
-        """Return the current AccessibleValue string, or ``None``."""
-
-        def operation(backend: NativeBackend) -> str | None:
-            vm_id, value = self._unwrap_reference(ref)
-            return backend.get_current_accessible_value(vm_id, value)
-
-        return self._call(operation)
-
     def accessible_value_range(
         self, ref: JavaRef
     ) -> tuple[str | None, str | None, str | None]:
@@ -606,26 +597,6 @@ class BridgeRuntime:
                 raise NativeCallError("requestFocus", vmID=vm_id, ac=value)
 
         self._call(operation)
-
-    def selection_count(self, ref: JavaRef) -> int:
-        def operation(backend: NativeBackend) -> int:
-            vm_id, value = self._unwrap_reference(ref)
-            count = backend.get_accessible_selection_count(vm_id, value)
-            if count < 0:
-                raise NativeCallError(
-                    "getAccessibleSelectionCountFromContext", vmID=vm_id, ac=value
-                )
-            return count
-
-        return self._call(operation)
-
-    def selection(self, ref: JavaRef, index: int) -> JavaRef | None:
-        def operation(backend: NativeBackend) -> JavaRef | None:
-            vm_id, value = self._unwrap_reference(ref)
-            selected = backend.get_accessible_selection(vm_id, value, index)
-            return self._own(vm_id, selected) if selected else None
-
-        return self._call(operation)
 
     def is_child_selected(self, ref: JavaRef, index: int) -> bool:
         def operation(backend: NativeBackend) -> bool:

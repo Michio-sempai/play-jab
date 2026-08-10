@@ -30,6 +30,7 @@ worth handling.
 
 from __future__ import annotations
 
+import queue
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -120,6 +121,7 @@ class FakeBackend:
         self._wake: Callable[[], None] | None = None
         self._vm_exit: Callable[[int], None] | None = None
         self._pending_vm_exit = False
+        self._event_queue: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
 
         self._windows: dict[int, FakeNode] = dict(windows or {})
         self._live: dict[int, FakeNode] = {}
@@ -210,9 +212,27 @@ class FakeBackend:
 
     def pump_messages(self) -> None:
         self.pump_turns += 1
+        self._drain_event_queue()
         if self._pending_vm_exit and self._vm_exit is not None:
             self._pending_vm_exit = False
             self._vm_exit(self.vm_id)
+
+    def _drain_event_queue(self) -> None:
+        """Release the owned refs any queued :meth:`emit_event` call minted.
+
+        Mirrors ``DllBackend._drain_callback_events``/``_clear_event_callbacks``:
+        a real property/table/selection event carries two owned JAB references
+        that the caller must release, not just a wakeup. A caller that reads
+        the event without draining and releasing this queue would leak - the
+        same mistake the real bridge lets through undetected.
+        """
+        while True:
+            try:
+                event_cookie, source_cookie = self._event_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.release_java_object(self.vm_id, event_cookie)
+            self.release_java_object(self.vm_id, source_cookie)
 
     def is_java_window(self, hwnd: int) -> bool:
         if self.faults_before_ready > 0:
@@ -493,17 +513,37 @@ class FakeBackend:
         self._vm_exit = vm_exit
 
     def emit_event(self) -> None:
-        """Wake hybrid waits in portable tests."""
+        """Simulate a property/table/selection event reaching the runtime.
+
+        Mints two owned refs for the event and its source, exactly as
+        ``DllBackend.setup_event_callbacks`` does for a real property-change
+        callback, and queues them for release on the next ``pump_messages()``.
+        A test that never pumps, or that pumps without the runtime's normal
+        drain path, will see ``acquired != released`` - the same signal a
+        leaked native reference would produce.
+        """
+        event_cookie = self._mint(FakeNode(name="<fake-event>"))
+        source_cookie = self._mint(FakeNode(name="<fake-event-source>"))
+        self._event_queue.put((event_cookie, source_cookie))
+        self._wake_now()
+
+    def _wake_now(self) -> None:
         if self._wake is not None:
             self._wake()
 
     def emit_vm_shutdown(self) -> None:
-        """Report this fake backend's JVM shutdown."""
+        """Report this fake backend's JVM shutdown.
+
+        A shutdown notification carries no owned references (the real bridge
+        signals it with ``event == source == 0``), so it wakes waiters
+        directly rather than through :meth:`emit_event`.
+        """
         self._pending_vm_exit = True
-        self.emit_event()
+        self._wake_now()
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
+        self._drain_event_queue()
 
 
 def fake_backend_factory(

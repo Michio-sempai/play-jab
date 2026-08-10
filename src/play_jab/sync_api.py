@@ -1110,8 +1110,7 @@ class Locator:
                             info = runtime.context_info(current)
                             if actionable:
                                 self._check_actionable(
-                                    _snapshot(info, self._window._api._registry),
-                                    require_action=False,
+                                    _snapshot(info, self._window._api._registry)
                                 )
                             child = runtime.child(current, index)
                             if child is None:
@@ -1123,7 +1122,7 @@ class Locator:
                         info = runtime.context_info(current)
                         snapshot = _snapshot(info, self._window._api._registry)
                         if actionable:
-                            self._check_actionable(snapshot, require_action=False)
+                            self._check_actionable(snapshot)
                         if interface is not None and not self._supports(
                             snapshot, interface
                         ):
@@ -1401,11 +1400,7 @@ class Locator:
                     raise
 
     @staticmethod
-    def _check_actionable(
-        snapshot: ElementSnapshot,
-        *,
-        require_action: bool,
-    ) -> None:
+    def _check_actionable(snapshot: ElementSnapshot) -> None:
         missing = {
             state
             for state in ("visible", "showing", "enabled")
@@ -1416,64 +1411,11 @@ class Locator:
                 "locator is not actionable; missing states: "
                 + ", ".join(sorted(missing))
             )
-        if require_action and not snapshot.accessible_action:
-            raise UnsupportedActionError(
-                "locator does not expose the AccessibleAction interface"
-            )
-
-    def _perform_semantic_click(self, match: _Match) -> None:
-        runtime = self._window._api._bridge
-        with runtime.context_from_hwnd(self._window.hwnd) as root:
-            current = root
-            owned: JavaRef | None = None
-            try:
-                for index in match.path:
-                    self._check_actionable(
-                        _snapshot(
-                            runtime.context_info(current),
-                            self._window._api._registry,
-                        ),
-                        require_action=False,
-                    )
-                    child = runtime.child(current, index)
-                    if child is None:
-                        raise NativeCallError(
-                            "getAccessibleContextInfo",
-                            reason="stale locator path",
-                        )
-                    if owned is not None:
-                        owned.close()
-                    owned = child
-                    current = child
-                info = runtime.context_info(current)
-                self._check_actionable(
-                    _snapshot(info, self._window._api._registry),
-                    require_action=True,
-                )
-                actions = runtime.accessible_actions(current)
-                action = next(
-                    (
-                        candidate
-                        for candidate in actions
-                        if candidate.casefold() == "click"
-                    ),
-                    None,
-                )
-                if action is None and len(actions) == 1:
-                    action = actions[0]
-                if action is None:
-                    raise UnsupportedActionError(
-                        f"locator has no click action; available actions: {actions!r}"
-                    )
-                runtime.do_accessible_actions(current, (action,))
-            finally:
-                if owned is not None:
-                    owned.close()
 
     def _click_with_mouse(self, timeout: int | None = None) -> None:
         match = self._wait_strict(self._timeout_ms(timeout))
         snapshot = match.snapshot
-        self._check_actionable(snapshot, require_action=False)
+        self._check_actionable(snapshot)
         if snapshot.width <= 0 or snapshot.height <= 0:
             raise LocatorError("locator has empty bounds and cannot be clicked")
         x = snapshot.x + snapshot.width // 2
