@@ -1874,10 +1874,12 @@ class Locator:
         matches: list[_Match],
         seen: list[int],
         match_limit: int | None,
+        info: ContextInfo | None = None,
     ) -> bool:
         if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
             raise LocatorError("accessibility traversal limit exceeded")
-        info = _context_info(self._window._api._bridge, ref)
+        if info is None:
+            info = _context_info(self._window._api._bridge, ref)
         seen[0] += 1
         raw_snapshot = _snapshot(
             info,
@@ -1913,6 +1915,7 @@ class Locator:
                         matches,
                         seen,
                         match_limit,
+                        info=child_info,
                     ):
                         return True
             finally:

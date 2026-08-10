@@ -18,6 +18,8 @@ HWND = 0xCAFE
 PID = 4242
 ORIGINAL_DPI = 17
 TIMEOUT_ZERO_SLACK_MS = 1_000
+MANAGED_DESCENDANTS_LABEL_COUNT = 2
+MANAGED_DESCENDANTS_CONTEXT_INFO_READS = 4
 
 
 @pytest.fixture
@@ -176,5 +178,60 @@ def test_managed_descendants_use_visible_children_and_model_indices(
         window = api.attach(pid=PID).window(hwnd=HWND)
         assert window.get_by_name("visible").snapshot(timeout=0).index_in_parent == 1
         assert window.get_by_name("hidden").count() == 0
+        assert api.live_ref_count == 0
+    assert backend.acquired == backend.released
+
+
+class _ContextInfoCountingBackend(FakeBackend):
+    """Counts ``getAccessibleContextInfo`` reads without changing behaviour."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.context_info_calls = 0
+
+    def get_accessible_context_info(self, vm_id: int, context: int):  # type: ignore[no-untyped-def]
+        self.context_info_calls += 1
+        return super().get_accessible_context_info(vm_id, context)
+
+
+def test_managed_descendants_read_context_info_once_per_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = FakeNode(
+        name="first", role_en_us="label", states_en_us="visible,showing,enabled"
+    )
+    second = FakeNode(
+        name="second", role_en_us="label", states_en_us="visible,showing,enabled"
+    )
+    managed = FakeNode(
+        name="managed",
+        role_en_us="list",
+        states_en_us="visible,showing,enabled,manages descendants",
+        children=[first, second],
+    )
+    root = FakeNode(
+        role_en_us="frame",
+        states_en_us="visible,showing,enabled",
+        children=[managed],
+    )
+    backend = _ContextInfoCountingBackend({HWND: root})
+    runtime = BridgeRuntime(lambda: backend, pump_interval=0.001)
+    monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
+    monkeypatch.setattr(
+        sync_api,
+        "_create_window_backend",
+        lambda: FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+    )
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
+    with PlayJab(timeout=0) as api:
+        window = api.attach(pid=PID).window(hwnd=HWND)
+        calls = backend.context_info_calls
+        assert window.locator(role="label").count() == MANAGED_DESCENDANTS_LABEL_COUNT
+        # One read per visited node (root, managed, first, second) - not the six
+        # a double read per "manages descendants" child would cost (root,
+        # managed, then first and second each read twice).
+        assert (
+            backend.context_info_calls - calls == MANAGED_DESCENDANTS_CONTEXT_INFO_READS
+        )
         assert api.live_ref_count == 0
     assert backend.acquired == backend.released
