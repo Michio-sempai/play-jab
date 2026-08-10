@@ -1267,7 +1267,7 @@ class Locator:
         )
 
     def select_option(self, option: str | int, timeout: int | None = None) -> None:
-        """Select one direct child by exact accessible name or zero-based index."""
+        """Select an option by exact accessible name or zero-based index."""
         if isinstance(option, bool) or not isinstance(option, (str, int)):
             raise TypeError("option must be an exact name or zero-based index")
 
@@ -1276,28 +1276,7 @@ class Locator:
             ref: JavaRef,
             snapshot: ElementSnapshot,
         ) -> None:
-            del snapshot
-            info = runtime.context_info(ref)
-            candidates: list[tuple[int, str]] = []
-            for index in range(info.children_count):
-                child = runtime.child(ref, index)
-                if child is None:
-                    continue
-                try:
-                    candidates.append((index, runtime.context_info(child).name))
-                finally:
-                    child.close()
-            if isinstance(option, int):
-                if option < 0 or option >= info.children_count:
-                    raise LocatorError("option index is outside the available children")
-                index = option
-            else:
-                matches = [index for index, name in candidates if name == option]
-                if len(matches) != 1:
-                    raise StrictModeViolation(
-                        f"option name resolved to {len(matches)} direct children"
-                    )
-                index = matches[0]
+            index = self._resolve_option(runtime, ref, snapshot, option)
             runtime.clear_selection(ref)
             runtime.set_child_selected(ref, index, True)
 
@@ -1320,23 +1299,116 @@ class Locator:
         def read(
             runtime: _RuntimeFacade,
             ref: JavaRef,
-            _snapshot: ElementSnapshot,
+            snapshot: ElementSnapshot,
         ) -> bool:
-            info = runtime.context_info(ref)
-            if isinstance(option, int):
-                return runtime.is_child_selected(ref, option)
-            for index in range(info.children_count):
-                child = runtime.child(ref, index)
-                if child is None:
-                    continue
-                try:
-                    if runtime.context_info(child).name == option:
-                        return runtime.is_child_selected(ref, index)
-                finally:
-                    child.close()
-            return False
+            index = self._resolve_option(runtime, ref, snapshot, option)
+            return runtime.is_child_selected(ref, index)
 
         return self._operate(read, timeout=0)
+
+    def _resolve_option(
+        self,
+        runtime: _RuntimeFacade,
+        ref: JavaRef,
+        snapshot: ElementSnapshot,
+        option: str | int,
+    ) -> int:
+        direct = self._direct_option_children(runtime, ref)
+        if snapshot.role != "combo box":
+            return self._match_option(option, direct, "direct children")
+
+        owners = self._nested_selection_owners(runtime, ref)
+        if not owners:
+            return self._match_option(option, direct, "direct children")
+        if isinstance(option, int):
+            if len(owners) != 1:
+                raise StrictModeViolation(
+                    f"combo box resolved to {len(owners)} nested selection owners"
+                )
+            _path, children = owners[0]
+            return self._match_option(option, children, "nested options")
+
+        matches = [
+            index
+            for _path, children in owners
+            for index, name, _role in children
+            if name == option
+        ]
+        if len(matches) != 1:
+            raise StrictModeViolation(
+                f"option name resolved to {len(matches)} nested options"
+            )
+        return matches[0]
+
+    @staticmethod
+    def _match_option(
+        option: str | int,
+        children: list[tuple[int, str, str]],
+        scope: str,
+    ) -> int:
+        if isinstance(option, int):
+            if option < 0 or option >= len(children):
+                raise LocatorError("option index is outside the available children")
+            return children[option][0]
+        matches = [index for index, name, _role in children if name == option]
+        if len(matches) != 1:
+            raise StrictModeViolation(f"option name resolved to {len(matches)} {scope}")
+        return matches[0]
+
+    @staticmethod
+    def _direct_option_children(
+        runtime: _RuntimeFacade,
+        ref: JavaRef,
+    ) -> list[tuple[int, str, str]]:
+        info = runtime.context_info(ref)
+        children: list[tuple[int, str, str]] = []
+        for index in range(info.children_count):
+            child = runtime.child(ref, index)
+            if child is None:
+                continue
+            try:
+                child_info = runtime.context_info(child)
+                children.append((index, child_info.name, child_info.role_en_us))
+            finally:
+                child.close()
+        return children
+
+    def _nested_selection_owners(
+        self,
+        runtime: _RuntimeFacade,
+        ref: JavaRef,
+    ) -> list[tuple[tuple[int, ...], list[tuple[int, str, str]]]]:
+        owners: list[tuple[tuple[int, ...], list[tuple[int, str, str]]]] = []
+        seen = [0]
+
+        def walk(parent: JavaRef, path: tuple[int, ...], depth: int) -> None:
+            if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
+                return
+            parent_info = runtime.context_info(parent)
+            for index in range(parent_info.children_count):
+                if seen[0] >= _MAX_TREE_NODES:
+                    return
+                child = runtime.child(parent, index)
+                if child is None:
+                    continue
+                seen[0] += 1
+                try:
+                    child_info = runtime.context_info(child)
+                    child_path = (*path, index)
+                    supports_selection = child_info.accessible_selection or bool(
+                        child_info.accessible_interfaces
+                        & int(AccessibleInterface.SELECTION)
+                    )
+                    if child_info.role_en_us == "list" and supports_selection:
+                        owners.append(
+                            (child_path, self._direct_option_children(runtime, child))
+                        )
+                    walk(child, child_path, depth + 1)
+                finally:
+                    child.close()
+
+        walk(ref, (), 1)
+        return owners
 
     def get_attribute(self, name: str, timeout: int | None = None) -> object:
         snapshot = self.snapshot(timeout=timeout)

@@ -15,6 +15,7 @@ from play_jab._native.bridge import BridgeRuntime
 from play_jab._native.fake import FakeBackend, FakeNode
 from play_jab.exceptions import (
     JavaVmExitedError,
+    LocatorError,
     LocatorTimeoutError,
     NativeCallError,
     StrictModeViolation,
@@ -37,6 +38,9 @@ class _ContractBackend(FakeBackend):
 
     def add_accessible_selection(self, vm_id: int, context: int, index: int) -> None:
         node = self._resolve(vm_id, context)
+        if node is not None and node.name == "Nested Role":
+            node.selected_children.add(index)
+            return
         if (
             node is not None
             and node.table_cells is not None
@@ -157,18 +161,52 @@ def _root() -> tuple[FakeNode, dict[str, FakeNode]]:
         accessible_selection=True,
         children=options,
     )
+    nested_options = [
+        FakeNode(
+            name=name,
+            role_en_us="label",
+            states_en_us="selected" if name == "Viewer" else "",
+        )
+        for name in ("Viewer", "Editor", "Admin")
+    ]
+    nested_list = FakeNode(
+        role_en_us="list",
+        accessible_selection=True,
+        children=nested_options,
+    )
+    nested_selection = FakeNode(
+        name="Nested Role",
+        role_en_us="combo box",
+        states_en_us=_states("enabled", "visible", "showing"),
+        accessible_selection=True,
+        children=[
+            FakeNode(
+                role_en_us="popup menu",
+                children=[
+                    FakeNode(
+                        role_en_us="scroll pane",
+                        children=[
+                            FakeNode(role_en_us="viewport", children=[nested_list])
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
     table = _table_node()
     root = FakeNode(
         name="Fixture",
         role_en_us="frame",
         states_en_us=_states("enabled", "visible", "showing"),
-        children=[text, password, checkbox, selection, table],
+        children=[text, password, checkbox, selection, nested_selection, table],
     )
     return root, {
         "text": text,
         "password": password,
         "checkbox": checkbox,
         "selection": selection,
+        "nested_selection": nested_selection,
+        "nested_list": nested_list,
         "table": table,
     }
 
@@ -316,7 +354,7 @@ def test_select_option_accepts_a_name_or_a_zero_based_index(
     _api, window, _backend, nodes = form_table_api
     options = window.get_by_name("Role")
 
-    assert window.get_by_name("Viewer").is_selected()
+    assert options.get_by_name("Viewer").is_selected()
     options.select_option("Editor")
     assert nodes["selection"].selected_children == {1}
     options.select_option(2)
@@ -334,6 +372,42 @@ def test_select_option_by_name_is_strict(
     with pytest.raises(StrictModeViolation, match="2 direct children"):
         nodes["selection"].children[0].name = "Admin"
         options.select_option("Admin")
+
+
+def test_select_option_uses_a_nested_combo_box_list(
+    form_table_api: tuple[PlayJab, JavaWindow, FakeBackend, dict[str, FakeNode]],
+) -> None:
+    api, window, backend, nodes = form_table_api
+    options = window.get_by_name("Nested Role")
+
+    options.select_option("Editor")
+    assert nodes["nested_selection"].selected_children == {1}
+    options.select_option(2)
+    assert nodes["nested_selection"].selected_children == {2}
+    assert api.live_ref_count == 0
+    assert backend.acquired == backend.released
+
+
+def test_nested_combo_box_option_name_is_strict(
+    form_table_api: tuple[PlayJab, JavaWindow, FakeBackend, dict[str, FakeNode]],
+) -> None:
+    _api, window, _backend, nodes = form_table_api
+    options = window.get_by_name("Nested Role")
+
+    with pytest.raises(StrictModeViolation, match="0 nested options"):
+        options.select_option("Missing")
+    nodes["nested_list"].children[0].name = "Admin"
+    with pytest.raises(StrictModeViolation, match="2 nested options"):
+        options.select_option("Admin")
+
+
+def test_nested_combo_box_rejects_an_out_of_range_index(
+    form_table_api: tuple[PlayJab, JavaWindow, FakeBackend, dict[str, FakeNode]],
+) -> None:
+    _api, window, _backend, _nodes = form_table_api
+
+    with pytest.raises(LocatorError, match="outside the available children"):
+        window.get_by_name("Nested Role").select_option(3)
 
 
 def test_select_option_rejects_a_bool_masquerading_as_an_index(

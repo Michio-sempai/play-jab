@@ -17,7 +17,6 @@ import pytest
 from play_jab.exceptions import (
     LocatorError,
     NativeCallError,
-    StrictModeViolation,
     UnsupportedActionError,
 )
 from play_jab.sync_api import Locator, PlayJab
@@ -313,46 +312,37 @@ def test_list_select_option_by_name_and_by_index(swing_fixture: SwingFixture) ->
             environment_list.select_option(0)
 
 
-def test_combo_box_select_option_cannot_reach_items_behind_the_popup(
+def test_combo_box_select_option_reaches_items_behind_the_popup(
     swing_fixture: SwingFixture,
 ) -> None:
-    """Debt marker: `select_option()` only inspects *direct* accessible
-    children by design. A `JList` (`fixture.environment_list`) exposes its
-    items as direct children, so it works (see the test above). A
-    `JComboBox` (`fixture.role_combo`) does not: JAB reports exactly one
-    direct child (an unnamed popup menu), and the actual "Viewer"/"Editor"/
-    "Admin" items sit four levels further down (popup menu -> scroll pane ->
-    viewport -> list -> item). This documents a real combo-box gap in
-    `select_option()`, confirmed against the real DLL, not a fixture defect -
-    fixing it means teaching `select_option()` to drill through single-child
-    popup wrappers, which is a library change out of this plan's scope.
-    """
+    """JComboBox options live inside its popup's nested JList in JAB."""
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         window = api.attach(hwnd=swing_fixture.hwnd).window()
         combo = window.get_by_name("fixture.role_combo")
-        with pytest.raises(StrictModeViolation):
+        try:
             combo.select_option("Editor")
-        with pytest.raises(LocatorError):
-            combo.select_option(1)
-        assert api.live_ref_count == 0
+            assert window.get_by_name("Editor").is_selected()
+            combo.select_option(2)
+            assert window.get_by_name("Admin").is_selected()
+            assert api.live_ref_count == 0
+        finally:
+            combo.select_option(0)
 
 
 def test_submit_button_reports_the_filled_form_via_status_label(
     swing_fixture: SwingFixture,
 ) -> None:
-    """End-to-end user flow: fill a form, submit it, read the result - via
-    `snapshot().description`, not `text_content()`, since a plain JLabel
-    publishes no AccessibleText. `fixture.role_combo` is left at its default
-    ("Viewer") because `select_option()` cannot drive it - see
-    `test_combo_box_select_option_cannot_reach_items_behind_the_popup`."""
+    """End-to-end form flow, including a nested JComboBox option."""
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         window = api.attach(hwnd=swing_fixture.hwnd).window()
         username = window.get_by_name("fixture.username_field")
+        role = window.get_by_name("fixture.role_combo")
         environment_list = window.get_by_name("fixture.environment_list")
         remember = window.get_by_name("fixture.remember_checkbox")
         status = window.get_by_name("fixture.status_label")
         try:
             username.fill("qa-bot")
+            role.select_option("Editor")
             environment_list.select_option("prod")
             if not remember.is_checked():
                 remember.check()
@@ -361,12 +351,13 @@ def test_submit_button_reports_the_filled_form_via_status_label(
 
             description = status.snapshot().description
             assert "user=qa-bot" in description
-            assert "role=Viewer" in description
+            assert "role=Editor" in description
             assert "env=prod" in description
             assert "remember=true" in description
             assert api.live_ref_count == 0
         finally:
             username.clear()
+            role.select_option(0)
             environment_list.select_option(0)
             if remember.is_checked():
                 remember.uncheck()
