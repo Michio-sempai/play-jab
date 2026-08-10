@@ -1165,6 +1165,16 @@ class Locator:
     def all(self) -> list[Locator]:
         return [self.nth(index) for index in range(self.count())]
 
+    def all_snapshots(self) -> list[ElementSnapshot]:
+        """Read every current match in one traversal.
+
+        Prefer this over ``all()`` followed by ``.snapshot()`` on each result:
+        that pattern re-resolves the whole locator chain, including a fresh
+        tree walk, once per match. ``all_snapshots()`` reuses the single
+        traversal ``count()`` already performs instead of discarding it.
+        """
+        return [match.snapshot for match in self._resolve_immediate()]
+
     def snapshot(self, timeout: int | None = None) -> ElementSnapshot:
         return self._wait_strict(self._timeout_ms(timeout)).snapshot
 

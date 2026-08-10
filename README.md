@@ -99,6 +99,11 @@ Pass `max_depth=` to cap how far a locator descends relative to its own
 starting point, so a shallow target behind a deep, showing sibling does not
 force a full traversal of that sibling first.
 
+`Locator.all()` returns lazy per-match locators, so reading `.snapshot()` on
+each one re-resolves the whole locator, including a fresh tree traversal, once
+per match. When you only need to read every match, call `all_snapshots()`
+instead: it reuses the single traversal `count()` already performs.
+
 Form locators support `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
 `select_option()`, `text_content()`, and state/attribute reads. Password text may
 be read explicitly, but is redacted from dumps, snapshots, logs, and errors.

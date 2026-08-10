@@ -250,6 +250,41 @@ def test_positional_locators_are_lazy_and_keep_depth_first_child_order(
     assert duplicates.nth(1).snapshot().description == "Right button"
 
 
+def test_all_snapshots_matches_all_plus_individual_snapshots(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, _ = locator_api
+    duplicates = window.get_by_name("Duplicate")
+    assert [snapshot.description for snapshot in duplicates.all_snapshots()] == [
+        item.snapshot().description for item in duplicates.all()
+    ]
+
+
+def test_all_snapshots_costs_one_traversal_not_one_per_match(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, runtime, backend = locator_api
+    duplicates = window.get_by_name("Duplicate")
+
+    acquired = backend.acquired
+    count = duplicates.count()
+    count_acquisitions = backend.acquired - acquired
+
+    acquired = backend.acquired
+    snapshots = duplicates.all_snapshots()
+    all_snapshots_acquisitions = backend.acquired - acquired
+
+    assert len(snapshots) == count == DUPLICATE_COUNT
+    # A single traversal, matching count()'s cost regardless of how many
+    # matches it finds - unlike all() + reading each .snapshot(), whose cost
+    # grows with every additional match (see FIRST_/SECOND_SNAPSHOT_ACQUISITIONS
+    # above: the second independent re-resolve already costs twice the first).
+    assert all_snapshots_acquisitions == count_acquisitions
+    assert runtime.live_ref_count == 0
+    assert backend.live_cookies == frozenset()
+    assert backend.acquired == backend.released
+
+
 def test_snapshot_requires_exactly_one_match(
     locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
 ) -> None:
