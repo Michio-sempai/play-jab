@@ -95,7 +95,7 @@ JDK_17_STATES = frozenset(
         "indeterminate",
         "manages descendants",
         "modal",
-        "multi line",
+        "multiple line",
         "multiselectable",
         "opaque",
         "pressed",
@@ -118,6 +118,14 @@ def test_standard_roles_are_the_complete_jdk_17_registry() -> None:
 
 def test_standard_states_are_the_complete_jdk_17_registry() -> None:
     assert STANDARD_STATES == JDK_17_STATES
+
+
+def test_multiple_line_uses_the_exact_jdk_17_display_string() -> None:
+    registry = AccessibilityRegistry()
+
+    assert registry.state("multiple line") == "multiple line"
+    with pytest.raises(UnsupportedAccessibleStateError):
+        registry.state("multi line")
 
 
 def test_unknown_is_a_standard_role() -> None:

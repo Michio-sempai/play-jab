@@ -100,7 +100,7 @@ STANDARD_STATES = frozenset(
         "indeterminate",
         "manages descendants",
         "modal",
-        "multi line",
+        "multiple line",
         "multiselectable",
         "opaque",
         "pressed",
