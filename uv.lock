@@ -645,7 +645,7 @@ wheels = [
 
 [[package]]
 name = "play-jab"
-version = "2026.8.4"
+version = "2026.8.5"
 source = { editable = "." }
 
 [package.dev-dependencies]
