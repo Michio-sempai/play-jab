@@ -33,10 +33,20 @@ class _Processes:
         return pid == PID and self.alive
 
 
+class _InaccessibleContextBackend(FakeBackend):
+    """A window that reports as Java (``is_java_window``) but whose accessible
+    context can never be fetched - the race ``expect_window`` must still
+    distinguish from "not a Java window at all"."""
+
+    def get_accessible_context_from_hwnd(self, hwnd: int) -> tuple[int, int] | None:
+        return None
+
+
 def _application(
     monkeypatch: pytest.MonkeyPatch,
     *,
     accessible: tuple[int, ...] = (OWNER, DIALOG, OTHER_DIALOG),
+    make_backend: type[FakeBackend] = FakeBackend,
 ) -> tuple[PlayJab, JavaApplication, FakeWindowBackend, _Processes]:
     nodes = {
         hwnd: FakeNode(
@@ -46,7 +56,7 @@ def _application(
         )
         for hwnd in accessible
     }
-    runtime = BridgeRuntime(lambda: FakeBackend(nodes))
+    runtime = BridgeRuntime(lambda: make_backend(nodes))
     windows = FakeWindowBackend(
         {OWNER: "Owner", DIALOG: "Expected", OTHER_DIALOG: "Other"},
         pid=PID,
@@ -94,22 +104,75 @@ def test_existing_matching_hwnd_is_not_mistaken_for_a_new_window(
         api.close()
 
 
-def test_expect_window_reports_zero_multiple_and_inaccessible_raw_windows(
+def test_expect_window_reports_zero_raw_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api, application, windows, _ = _application(monkeypatch, accessible=(OWNER,))
+    api, application, _windows, _ = _application(monkeypatch)
     try:
         with (
             pytest.raises(JavaWindowNotFoundError),
             application.expect_window(timeout=0),
         ):
             pass
+    finally:
+        api.close()
+
+
+def test_expect_window_ignores_non_java_hwnds_and_resolves_the_single_java_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second, non-Java HWND created by the same action must not be mistaken
+    for ambiguity - only Java-accessible HWNDs are candidates."""
+    api, application, windows, _ = _application(monkeypatch, accessible=(OWNER, DIALOG))
+    try:
+        with application.expect_window(timeout=0) as pending:
+            windows.visible.extend([DIALOG, OTHER_DIALOG])
+        assert pending.value.hwnd == DIALOG
+        assert api.live_ref_count == 0
+    finally:
+        api.close()
+
+
+def test_expect_window_reports_not_found_for_only_non_java_raw_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-Java HWNDs never surface as candidates, so with none of the new raw
+    windows being Java-accessible the expectation times out as not-found, not
+    ambiguous or inaccessible - this is the exact bug scenario."""
+    api, application, windows, _ = _application(monkeypatch, accessible=(OWNER,))
+    try:
+        with (
+            pytest.raises(JavaWindowNotFoundError),
+            application.expect_window(timeout=0),
+        ):
+            windows.visible.extend([DIALOG, OTHER_DIALOG])
+    finally:
+        api.close()
+
+
+def test_expect_window_still_raises_ambiguous_for_two_java_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, application, windows, _ = _application(monkeypatch)
+    try:
         with (
             pytest.raises(JavaWindowAmbiguousError),
             application.expect_window(timeout=0),
         ):
             windows.visible.extend([DIALOG, OTHER_DIALOG])
-        windows.visible[:] = [OWNER]
+    finally:
+        api.close()
+
+
+def test_expect_window_reports_inaccessible_raw_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, application, windows, _ = _application(
+        monkeypatch,
+        accessible=(OWNER, DIALOG),
+        make_backend=_InaccessibleContextBackend,
+    )
+    try:
         with (
             pytest.raises(JavaWindowNotAccessibleError, match="did not become"),
             application.expect_window(title="Expected", timeout=0),

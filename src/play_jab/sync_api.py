@@ -732,12 +732,14 @@ class WindowExpectation:
 
     def _raw_matches(self, before: frozenset[int]) -> list[int]:
         windows = self._application._api._windows
+        bridge = self._application._api._bridge
         return [
             hwnd
             for hwnd in windows.enum_windows()
             if hwnd not in before
             and windows.get_window_pid(hwnd) == self._application.pid
             and (self._title is None or windows.get_window_title(hwnd) == self._title)
+            and bridge.is_java_window(hwnd)
         ]
 
     def _wait_for_new_window(self, before: frozenset[int]) -> JavaWindow:
@@ -757,14 +759,13 @@ class WindowExpectation:
                 )
             if matches:
                 hwnd = matches[0]
-                if api._bridge.is_java_window(hwnd):
-                    try:
-                        with api._bridge.context_from_hwnd(hwnd):
-                            pass
-                    except (JavaWindowNotFoundError, JavaWindowNotAccessibleError):
+                try:
+                    with api._bridge.context_from_hwnd(hwnd):
                         pass
-                    else:
-                        return JavaWindow(self._application, hwnd, self._timeout)
+                except (JavaWindowNotFoundError, JavaWindowNotAccessibleError):
+                    pass
+                else:
+                    return JavaWindow(self._application, hwnd, self._timeout)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if inaccessible is not None:

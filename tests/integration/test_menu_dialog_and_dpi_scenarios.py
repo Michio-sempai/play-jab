@@ -108,7 +108,11 @@ def test_message_dialog_via_joptionpane(swing_fixture: SwingFixture) -> None:
     """The message dialog's own "OK" button is assembled by the current
     Look&Feel (BasicOptionPaneUI in English locale), not by the fixture -
     unlike everything else in this suite, its accessible name is not a
-    fixture-chosen constant."""
+    fixture-chosen constant.
+
+    Uses ``expect_window()`` without ``title=`` - the only scenario in this
+    suite exercising that path, matching the untitled call from a real-world
+    JAB client bug report."""
     if not can_change_foreground_window(swing_fixture.hwnd):
         pytest.skip(
             "this session cannot change the Windows foreground window; "
@@ -120,7 +124,7 @@ def test_message_dialog_via_joptionpane(swing_fixture: SwingFixture) -> None:
         menu_dialogs = window.get_by_name("fixture.menu_dialogs")
         menu_dialogs.click()
 
-        with application.expect_window(title="Fixture Message") as pending:
+        with application.expect_window() as pending:
             menu_dialogs.get_by_name("fixture.menu_item_message_dialog").click(
                 opens_window=True
             )
