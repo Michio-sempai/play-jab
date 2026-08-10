@@ -78,6 +78,18 @@ def _tree() -> FakeNode:
                     ),
                 ],
             ),
+            FakeNode(
+                name="Hidden parent",
+                role_en_us="panel",
+                states_en_us="enabled,visible",
+                children=[
+                    FakeNode(
+                        name="Inconsistent showing child",
+                        role_en_us="label",
+                        states_en_us="enabled,visible,showing",
+                    )
+                ],
+            ),
         ],
     )
 
@@ -123,6 +135,16 @@ def test_role_state_visibility_and_index_filters_compose(
         window.locator(role="push button", visible_only=True).count() == DUPLICATE_COUNT
     )
     assert window.locator(role="push button", index_in_parent=1).count() == 1
+
+
+def test_showing_only_prunes_non_showing_subtrees_without_changing_visible_only(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, _ = locator_api
+    name = "Inconsistent showing child"
+    assert window.get_by_name(name).count() == 1
+    assert window.locator(name=name, visible_only=True).count() == 1
+    assert window.locator(name=name, showing_only=True).count() == 0
 
 
 def test_window_snapshot_reads_only_the_root_context(

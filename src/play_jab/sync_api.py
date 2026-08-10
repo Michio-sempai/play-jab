@@ -788,6 +788,7 @@ class _Query:
     states: frozenset[str] = frozenset()
     index_in_parent: int | None = None
     visible_only: bool = False
+    showing_only: bool = False
 
     def matches(self, snapshot: ElementSnapshot) -> bool:
         return (
@@ -800,6 +801,7 @@ class _Query:
                 or snapshot.index_in_parent == self.index_in_parent
             )
             and (not self.visible_only or "visible" in snapshot.states)
+            and (not self.showing_only or "showing" in snapshot.states)
         )
 
 
@@ -839,6 +841,7 @@ class JavaWindow:
         states: str | Iterable[str] | None = None,
         index_in_parent: int | None = None,
         visible_only: bool = False,
+        showing_only: bool = False,
     ) -> Locator:
         query = _make_query(
             self._api._registry,
@@ -848,6 +851,7 @@ class JavaWindow:
             states,
             index_in_parent,
             visible_only,
+            showing_only,
         )
         return Locator(self, (_Step(query),))
 
@@ -952,6 +956,7 @@ def _make_query(  # noqa: PLR0913, PLR0917
     states: str | Iterable[str] | None,
     index_in_parent: int | None,
     visible_only: bool,
+    showing_only: bool,
 ) -> _Query:
     if role is not None:
         if not isinstance(role, str):
@@ -965,6 +970,8 @@ def _make_query(  # noqa: PLR0913, PLR0917
         raise ValueError("index_in_parent must be a non-negative integer")
     if not isinstance(visible_only, bool):
         raise ValueError("visible_only must be a bool")
+    if not isinstance(showing_only, bool):
+        raise ValueError("showing_only must be a bool")
     state_values = (
         () if states is None else ((states,) if isinstance(states, str) else states)
     )
@@ -976,6 +983,7 @@ def _make_query(  # noqa: PLR0913, PLR0917
         states=checked_states,
         index_in_parent=index_in_parent,
         visible_only=visible_only,
+        showing_only=showing_only,
     )
 
 
@@ -1018,6 +1026,7 @@ class Locator:
         states: str | Iterable[str] | None = None,
         index_in_parent: int | None = None,
         visible_only: bool = False,
+        showing_only: bool = False,
     ) -> Locator:
         query = _make_query(
             self._window._api._registry,
@@ -1027,6 +1036,7 @@ class Locator:
             states,
             index_in_parent,
             visible_only,
+            showing_only,
         )
         return Locator(self._window, (*self._chain, _Step(query)))
 
@@ -1773,6 +1783,8 @@ class Locator:
             self._window._api._registry,
             redact_password=False,
         )
+        if query.showing_only and "showing" not in raw_snapshot.states:
+            return False
         if consider and query.matches(raw_snapshot):
             matches.append(_Match(path, _snapshot(info, self._window._api._registry)))
             if match_limit is not None and len(matches) >= match_limit:

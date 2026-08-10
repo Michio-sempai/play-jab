@@ -124,6 +124,14 @@ def test_locator_rejects_a_non_bool_visible_only(
         win.locator(visible_only="yes")  # type: ignore[arg-type]
 
 
+def test_locator_rejects_a_non_bool_showing_only(
+    window: tuple[PlayJab, JavaWindow, FakeBackend],
+) -> None:
+    _, win, _ = window
+    with pytest.raises(ValueError, match="showing_only must be a bool"):
+        win.locator(showing_only="yes")  # type: ignore[arg-type]
+
+
 # -- Locator.fill() / .scroll() / .select_option() ---------------------------
 def test_fill_rejects_a_non_string_value(
     window: tuple[PlayJab, JavaWindow, FakeBackend],
