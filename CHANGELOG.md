@@ -1,3 +1,9 @@
+## v2026.08.4 (2026-08-10)
+
+### Fix
+
+- mint owned references for FakeBackend events and drop dead code
+
 ## v2026.08.3 (2026-08-05)
 
 ### Feat
