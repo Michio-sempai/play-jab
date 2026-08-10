@@ -46,6 +46,7 @@ lint = [
 test = [
     "pytest",
     "pytest-cov",
+    "pytest-timeout",
 ]
 dev = [
     { include-group = "lint" },
@@ -82,7 +83,10 @@ packages = ["play_jab"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=play_jab --cov-report=term-missing"
+# What to measure is declared once, in [tool.coverage.run] source below - not
+# repeated here as `--cov=play_jab`, which used to trigger coverage's
+# "Module was previously imported, but not measured" warning.
+addopts = "--cov --cov-report=term-missing"
 markers = [
     "integration_jab: opt-in tests requiring Windows, a JDK 17 fixture, and Java Access Bridge",
 ]

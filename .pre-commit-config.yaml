@@ -25,6 +25,20 @@ repos:
         args: [src]
         pass_filenames: false
 
+  - repo: local
+    hooks:
+      - id: mypy-tests
+        name: mypy (tests, indicator)
+        # AGENTS.md requires only `mypy src`; this is an indicator pass for the
+        # whole test suite, unit and integration (unit-tests-review.md finding
+        # B-8). Runs via `uv run` rather than the mirrors-mypy hook's isolated
+        # environment because tests import pytest and play_jab itself, neither
+        # of which that environment has installed.
+        entry: uv run mypy tests
+        language: system
+        pass_filenames: false
+        types: [python]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
