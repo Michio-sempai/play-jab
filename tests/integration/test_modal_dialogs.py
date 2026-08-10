@@ -11,6 +11,7 @@ from play_jab.sync_api import JavaApplication, JavaWindow, Locator, PlayJab
 
 from .conftest import (
     DialogFixture,
+    can_change_foreground_window,
     close_raw_window,
     wait_for_raw_window,
     wait_for_raw_window_closed,
@@ -60,6 +61,21 @@ def _application(api: PlayJab, fixture: DialogFixture) -> JavaApplication:
     assert owner.get_by_name("repro.main").snapshot().role == "frame"
     assert api.live_ref_count == 0
     return application
+
+
+def _require_foreground_capable(hwnd: int) -> None:
+    """Skip synthetic-input tests when this session cannot own the foreground.
+
+    Distinguishes an environment limitation (locked/non-interactive desktop, or
+    another process holding the foreground lock) from a real regression in
+    `opens_window=True`'s underlying `set_foreground_window` retry loop - see
+    `can_change_foreground_window`'s docstring.
+    """
+    if not can_change_foreground_window(hwnd):
+        pytest.skip(
+            "this session cannot change the Windows foreground window; "
+            "opens_window=True cannot be exercised here"
+        )
 
 
 def _assert_owner_recovered(
@@ -116,6 +132,7 @@ def test_scenario_c_remains_accessible_and_closes_semantically(
 def test_modal_b_is_safe_with_window_expectation_and_physical_open_click(
     dialog_fixture: DialogFixture,
 ) -> None:
+    _require_foreground_capable(dialog_fixture.hwnd)
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         application = _application(api, dialog_fixture)
         owner = application.window(title=_OWNER_TITLE)
@@ -157,6 +174,7 @@ def test_nested_semantic_open_blocks_until_win32_close_then_recovers(
 def test_nested_physical_open_keeps_nested_outer_and_owner_accessible(
     dialog_fixture: DialogFixture,
 ) -> None:
+    _require_foreground_capable(dialog_fixture.hwnd)
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         application = _application(api, dialog_fixture)
         owner, outer = _open_scenario_c(application)
