@@ -72,6 +72,7 @@ def test_the_public_types_are_exported_from_sync_api() -> None:
         "visible_only",
         "showing_only",
     )
+    assert _parameters(JavaWindow.snapshot) == ("self",)
     assert _parameters(Locator.exists) == ("self",)
     assert _parameters(Locator.wait_for) == ("self", "state", "timeout")
     assert _parameters(Locator.click) == ("self", "opens_window", "timeout")

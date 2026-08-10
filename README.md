@@ -90,6 +90,12 @@ every operation; snapshots and accessibility trees contain copied metadata and
 do not own Java references. Closing any or all `PlayJab` sessions leaves every
 attached process alive. There is intentionally no `PlayJab.launch()`.
 
+`JavaWindow.snapshot()` reads only the window root. `Locator.exists()` is an
+immediate, non-strict first-match check; use `wait_for()` when polling is
+required. Positional `first()` and `nth()` locators stop traversal once their
+requested match is found. Set `showing_only=True` to match showing nodes and
+prune non-showing subtrees; `visible_only=True` keeps its non-pruning behavior.
+
 Form locators support `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
 `select_option()`, `text_content()`, and state/attribute reads. Password text may
 be read explicitly, but is redacted from dumps, snapshots, logs, and errors.

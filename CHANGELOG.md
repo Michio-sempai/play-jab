@@ -1,3 +1,11 @@
+## Unreleased
+
+### Feat
+
+- add root-only `JavaWindow.snapshot()`, immediate `Locator.exists()`, and
+  pruning `showing_only` locator traversal
+- stop `first()` and `nth()` traversal once the requested match is found
+
 ## v2026.08.5 (2026-08-10)
 
 ### Feat

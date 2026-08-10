@@ -82,6 +82,12 @@ password `text_content()` reads are allowed, but secret values are excluded from
 snapshots, dumps, logs, and exceptions. Table indices are zero-based and invalid
 indices raise `TableIndexError`.
 
+Use `window.snapshot()` for root-window metadata without a descendant scan and
+`locator.exists()` for an immediate, non-strict first-match check. `first()` and
+`nth()` stop after the requested match. A locator with `showing_only=True`
+matches showing nodes and prunes non-showing subtrees; `visible_only=True` only
+filters matches and intentionally does not prune.
+
 Do not import from `play_jab._native`: its names, signatures, and lifecycle
 contracts may change without notice.
 
