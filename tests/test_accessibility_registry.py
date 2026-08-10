@@ -61,7 +61,7 @@ JDK_17_ROLES = frozenset(
         "scroll pane",
         "separator",
         "slider",
-        "spin box",
+        "spinbox",
         "split pane",
         "status bar",
         "swing component",
@@ -126,6 +126,14 @@ def test_multiple_line_uses_the_exact_jdk_17_display_string() -> None:
     assert registry.state("multiple line") == "multiple line"
     with pytest.raises(UnsupportedAccessibleStateError):
         registry.state("multi line")
+
+
+def test_spinbox_uses_the_exact_jdk_17_display_string() -> None:
+    registry = AccessibilityRegistry()
+
+    assert registry.role("spinbox") == "spinbox"
+    with pytest.raises(UnsupportedAccessibleRoleError):
+        registry.role("spin box")
 
 
 def test_unknown_is_a_standard_role() -> None:

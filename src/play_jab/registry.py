@@ -65,7 +65,7 @@ STANDARD_ROLES = frozenset(
         "scroll pane",
         "separator",
         "slider",
-        "spin box",
+        "spinbox",
         "split pane",
         "status bar",
         "table",
