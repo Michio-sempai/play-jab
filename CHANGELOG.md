@@ -1,16 +1,22 @@
-## Unreleased
+## v2026.08.6 (2026-08-10)
 
 ### Feat
 
-- add root-only `JavaWindow.snapshot()`, immediate `Locator.exists()`, and
-  pruning `showing_only` locator traversal
-- stop `first()` and `nth()` traversal once the requested match is found
-- add `max_depth` to `locator()`/`get_by_role()`/`get_by_name()` to bound
-  traversal depth
+- add max_depth to bound locator traversal
+- prune non-showing locator subtrees
+- add root-only window snapshot
 
 ### Fix
 
-- filter non-Java HWNDs out of `expect_window()` before its ambiguity check
+- filter non-java hwnds before expect_window ambiguity check
+- raise accessibility traversal limit
+- select nested JComboBox options
+- use JDK 17 spinbox role name
+- use JDK 17 multiple line state name
+
+### Perf
+
+- short-circuit positional locator traversal
 
 ## v2026.08.5 (2026-08-10)
 
