@@ -1057,6 +1057,10 @@ class Locator:
     def count(self) -> int:
         return len(self._resolve_immediate())
 
+    def exists(self) -> bool:
+        """Return immediately after finding the first matching element."""
+        return bool(self._resolve_immediate(match_limit=1))
+
     def all(self) -> list[Locator]:
         return [self.nth(index) for index in range(self.count())]
 
@@ -1663,10 +1667,10 @@ class Locator:
         except Exception:  # diagnostics must not replace the original failure
             return "<accessibility tree unavailable>"
 
-    def _resolve_immediate(self) -> list[_Match]:
+    def _resolve_immediate(self, match_limit: int | None = None) -> list[_Match]:
         for attempt in range(2):
             try:
-                return self._resolve_once()
+                return self._resolve_once(match_limit)
             except (_StaleContext, NativeCallError):
                 if attempt:
                     raise _StaleLocatorError(
@@ -1674,14 +1678,26 @@ class Locator:
                     ) from None
         raise AssertionError("unreachable")
 
-    def _resolve_once(self) -> list[_Match]:
+    def _resolve_once(self, match_limit: int | None = None) -> list[_Match]:
         parents: list[_Match] | None = None
         for step_index, step in enumerate(self._chain):
+            scan_limit = None
+            if step.position is not None and step.position >= 0:
+                scan_limit = step.position + 1
+            elif step_index == len(self._chain) - 1:
+                scan_limit = match_limit
             if parents is None:
-                matches = self._scan((), step.query, include_start=True)
+                matches = self._scan(
+                    (), step.query, include_start=True, match_limit=scan_limit
+                )
             else:
                 parent = self._strict(parents)
-                matches = self._scan(parent.path, step.query, include_start=False)
+                matches = self._scan(
+                    parent.path,
+                    step.query,
+                    include_start=False,
+                    match_limit=scan_limit,
+                )
             parents = self._select_position(matches, step.position)
             if step_index < len(self._chain) - 1:
                 self._strict(parents)
@@ -1705,6 +1721,7 @@ class Locator:
         query: _Query,
         *,
         include_start: bool,
+        match_limit: int | None = None,
     ) -> list[_Match]:
         runtime = self._window._api._bridge
         with runtime.context_from_hwnd(self._window.hwnd) as root:
@@ -1729,6 +1746,7 @@ class Locator:
                     include_start,
                     matches,
                     seen,
+                    match_limit,
                 )
                 return matches
             finally:
@@ -1744,7 +1762,8 @@ class Locator:
         consider: bool,
         matches: list[_Match],
         seen: list[int],
-    ) -> None:
+        match_limit: int | None,
+    ) -> bool:
         if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
             raise LocatorError("accessibility traversal limit exceeded")
         info = _context_info(self._window._api._bridge, ref)
@@ -1756,6 +1775,8 @@ class Locator:
         )
         if consider and query.matches(raw_snapshot):
             matches.append(_Match(path, _snapshot(info, self._window._api._registry)))
+            if match_limit is not None and len(matches) >= match_limit:
+                return True
         visible = (
             self._window._api._bridge.visible_children(ref)
             if "manages descendants" in raw_snapshot.states
@@ -1768,7 +1789,7 @@ class Locator:
                     index = child_info.index_in_parent
                     if index < 0:
                         raise _StaleContext
-                    self._walk(
+                    if self._walk(
                         child,
                         (*path, index),
                         depth + 1,
@@ -1776,17 +1797,19 @@ class Locator:
                         True,
                         matches,
                         seen,
-                    )
+                        match_limit,
+                    ):
+                        return True
             finally:
                 for child in reversed(visible):
                     child.close()
-            return
+            return False
         for index in range(info.children_count):
             ordinary_child = self._window._api._bridge.child(ref, index)
             if ordinary_child is None:
                 raise _StaleContext
             with ordinary_child:
-                self._walk(
+                if self._walk(
                     ordinary_child,
                     (*path, index),
                     depth + 1,
@@ -1794,7 +1817,10 @@ class Locator:
                     True,
                     matches,
                     seen,
-                )
+                    match_limit,
+                ):
+                    return True
+        return False
 
     def accessibility_tree(
         self,

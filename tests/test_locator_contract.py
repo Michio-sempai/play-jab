@@ -24,6 +24,9 @@ HWND = 0xCAFE
 SECRET = "hunter2-secret"
 DUPLICATE_COUNT = 2
 BUTTON_COUNT = 3
+FIRST_EXISTS_ACQUISITIONS = 3
+FIRST_SNAPSHOT_ACQUISITIONS = 3
+SECOND_SNAPSHOT_ACQUISITIONS = 6
 
 
 def _tree() -> FakeNode:
@@ -132,6 +135,31 @@ def test_window_snapshot_reads_only_the_root_context(
     assert backend.acquired - acquired == 1
     assert runtime.live_ref_count == 0
     assert backend.live_cookies == frozenset()
+
+
+def test_exists_is_non_strict_and_stops_at_the_first_match(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, runtime, backend = locator_api
+    acquired = backend.acquired
+    assert window.get_by_name("Duplicate").exists()
+    assert backend.acquired - acquired == FIRST_EXISTS_ACQUISITIONS
+    assert not window.get_by_name("Missing").exists()
+    assert runtime.live_ref_count == 0
+    assert backend.live_cookies == frozenset()
+
+
+def test_first_and_nth_stop_after_the_requested_match(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, backend = locator_api
+    duplicates = window.get_by_name("Duplicate")
+    acquired = backend.acquired
+    assert duplicates.first().snapshot().description == "Левая кнопка"
+    assert backend.acquired - acquired == FIRST_SNAPSHOT_ACQUISITIONS
+    acquired = backend.acquired
+    assert duplicates.nth(1).snapshot().description == "Right button"
+    assert backend.acquired - acquired == SECOND_SNAPSHOT_ACQUISITIONS
 
 
 def test_nested_locator_resolves_parent_strictly_and_only_searches_descendants(
