@@ -1,3 +1,9 @@
+## v2026.08.5 (2026-08-10)
+
+### Feat
+
+- add play-jab-skill CLI to bundle a Claude Code skill
+
 ## v2026.08.4 (2026-08-10)
 
 ### Fix
