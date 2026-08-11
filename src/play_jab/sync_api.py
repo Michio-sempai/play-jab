@@ -1072,6 +1072,7 @@ def _make_query(  # noqa: PLR0913, PLR0917
 class _Match:
     path: tuple[int, ...]
     snapshot: ElementSnapshot
+    text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1174,6 +1175,39 @@ class Locator:
         traversal ``count()`` already performs instead of discarding it.
         """
         return [match.snapshot for match in self._resolve_immediate()]
+
+    def all_text_contents(self) -> list[str]:
+        """Read text content for every current match in one traversal.
+
+        Prefer this over ``all()`` followed by ``.text_content()`` on each
+        result: that pattern re-resolves the whole locator chain — including
+        a fresh tree walk from the locator's root — once per match, which is
+        the dominant cost when a chain starts high up a large tree (e.g. from
+        a window root) and there are many matches. This reads each match's
+        AccessibleText (falling back to description, then name, exactly like
+        ``text_content()``) while its native reference is still open from the
+        single traversal, instead of reopening one per match.
+
+        Unlike ``text_content()``, password-role (``"password text"``) values
+        are redacted here: this is a bulk dump across every match, not an
+        explicit single-field read.
+        """
+        matches = self._resolve_immediate(read_text=True)
+        return [match.text if match.text is not None else "" for match in matches]
+
+    def all_snapshots_with_text(self) -> list[tuple[ElementSnapshot, str]]:
+        """Read snapshot and text content for every current match, together.
+
+        Equivalent to ``zip(locator.all_snapshots(), locator.all_text_contents())``,
+        but one traversal instead of two: both are already read from the same
+        ``_Match`` per node, so calling the two separately would pay the
+        chain-resolution cost twice for no extra data.
+        """
+        matches = self._resolve_immediate(read_text=True)
+        return [
+            (match.snapshot, match.text if match.text is not None else "")
+            for match in matches
+        ]
 
     def snapshot(self, timeout: int | None = None) -> ElementSnapshot:
         return self._wait_strict(self._timeout_ms(timeout)).snapshot
@@ -1778,10 +1812,12 @@ class Locator:
         except Exception:  # diagnostics must not replace the original failure
             return "<accessibility tree unavailable>"
 
-    def _resolve_immediate(self, match_limit: int | None = None) -> list[_Match]:
+    def _resolve_immediate(
+        self, match_limit: int | None = None, *, read_text: bool = False
+    ) -> list[_Match]:
         for attempt in range(2):
             try:
-                return self._resolve_once(match_limit)
+                return self._resolve_once(match_limit, read_text=read_text)
             except (_StaleContext, NativeCallError):
                 if attempt:
                     raise _StaleLocatorError(
@@ -1789,17 +1825,27 @@ class Locator:
                     ) from None
         raise AssertionError("unreachable")
 
-    def _resolve_once(self, match_limit: int | None = None) -> list[_Match]:
+    def _resolve_once(
+        self, match_limit: int | None = None, *, read_text: bool = False
+    ) -> list[_Match]:
         parents: list[_Match] | None = None
+        last_step = len(self._chain) - 1
         for step_index, step in enumerate(self._chain):
             scan_limit = None
             if step.position is not None and step.position >= 0:
                 scan_limit = step.position + 1
-            elif step_index == len(self._chain) - 1:
+            elif step_index == last_step:
                 scan_limit = match_limit
+            # Only the final step's matches are ever returned — reading text
+            # for intermediate (parent-narrowing) matches would be wasted work.
+            step_read_text = read_text and step_index == last_step
             if parents is None:
                 matches = self._scan(
-                    (), step.query, include_start=True, match_limit=scan_limit
+                    (),
+                    step.query,
+                    include_start=True,
+                    match_limit=scan_limit,
+                    read_text=step_read_text,
                 )
             else:
                 parent = self._strict(parents)
@@ -1808,9 +1854,10 @@ class Locator:
                     step.query,
                     include_start=False,
                     match_limit=scan_limit,
+                    read_text=step_read_text,
                 )
             parents = self._select_position(matches, step.position)
-            if step_index < len(self._chain) - 1:
+            if step_index < last_step:
                 self._strict(parents)
         return parents or []
 
@@ -1833,6 +1880,7 @@ class Locator:
         *,
         include_start: bool,
         match_limit: int | None = None,
+        read_text: bool = False,
     ) -> list[_Match]:
         runtime = self._window._api._bridge
         with runtime.context_from_hwnd(self._window.hwnd) as root:
@@ -1858,6 +1906,7 @@ class Locator:
                     matches,
                     seen,
                     match_limit,
+                    read_text=read_text,
                 )
                 return matches
             finally:
@@ -1875,6 +1924,8 @@ class Locator:
         seen: list[int],
         match_limit: int | None,
         info: ContextInfo | None = None,
+        *,
+        read_text: bool = False,
     ) -> bool:
         if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
             raise LocatorError("accessibility traversal limit exceeded")
@@ -1889,7 +1940,17 @@ class Locator:
         if query.showing_only and "showing" not in raw_snapshot.states:
             return False
         if consider and query.matches(raw_snapshot):
-            matches.append(_Match(path, _snapshot(info, self._window._api._registry)))
+            # `ref` is still open here — the caller frame closes it only
+            # after this call returns — so a live AccessibleText read costs
+            # nothing extra: no second chain resolution is needed later.
+            text = (
+                _bulk_text_content(self._window._api._bridge, ref, raw_snapshot)
+                if read_text
+                else None
+            )
+            matches.append(
+                _Match(path, _snapshot(info, self._window._api._registry), text)
+            )
             if match_limit is not None and len(matches) >= match_limit:
                 return True
         if query.max_depth is not None and depth >= query.max_depth:
@@ -1916,6 +1977,7 @@ class Locator:
                         seen,
                         match_limit,
                         info=child_info,
+                        read_text=read_text,
                     ):
                         return True
             finally:
@@ -1936,6 +1998,7 @@ class Locator:
                     matches,
                     seen,
                     match_limit,
+                    read_text=read_text,
                 ):
                     return True
         return False
@@ -2281,6 +2344,28 @@ class TableCellLocator:
                     f"text within {wait} ms; last={last!r}"
                 )
             window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
+
+
+def _bulk_text_content(
+    runtime: BridgeRuntime | _RuntimeFacade,
+    ref: JavaRef,
+    snapshot: ElementSnapshot,
+) -> str:
+    """Same fallback as ``Locator.text_content()``, redacting password values.
+
+    Used only by ``all_text_contents()``'s bulk traversal, where every match
+    is read regardless of which field a caller actually wanted — unlike
+    ``text_content()``'s explicit single-field read, this must not leak a
+    password value incidentally swept up in the batch.
+    """
+    text = None
+    if snapshot.accessible_text:
+        text = runtime.accessible_text(ref)
+    if text is None:
+        text = snapshot.description or snapshot.name
+    if snapshot.role == _PASSWORD_ROLE and text:
+        return "<redacted>"
+    return text
 
 
 def _context_info(runtime: BridgeRuntime | _RuntimeFacade, ref: JavaRef) -> ContextInfo:

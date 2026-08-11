@@ -285,6 +285,151 @@ def test_all_snapshots_costs_one_traversal_not_one_per_match(
     assert backend.acquired == backend.released
 
 
+def test_all_text_contents_costs_one_traversal_not_one_per_match(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, runtime, backend = locator_api
+    duplicates = window.get_by_name("Duplicate")
+
+    acquired = backend.acquired
+    count = duplicates.count()
+    count_acquisitions = backend.acquired - acquired
+
+    acquired = backend.acquired
+    contents = duplicates.all_text_contents()
+    all_text_contents_acquisitions = backend.acquired - acquired
+
+    assert len(contents) == count == DUPLICATE_COUNT
+    # Same shape as test_all_snapshots_costs_one_traversal_not_one_per_match:
+    # a single traversal regardless of match count, unlike all() followed by
+    # .text_content() on each result (one full chain re-resolve per match).
+    assert all_text_contents_acquisitions == count_acquisitions
+    assert runtime.live_ref_count == 0
+    assert backend.live_cookies == frozenset()
+    assert backend.acquired == backend.released
+
+
+def test_all_snapshots_with_text_matches_the_two_separate_calls_zipped(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, _, _ = locator_api
+    duplicates = window.get_by_name("Duplicate")
+    assert duplicates.all_snapshots_with_text() == list(
+        zip(duplicates.all_snapshots(), duplicates.all_text_contents(), strict=True)
+    )
+
+
+def test_all_snapshots_with_text_costs_one_traversal_not_two(
+    locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
+) -> None:
+    _, window, runtime, backend = locator_api
+    duplicates = window.get_by_name("Duplicate")
+
+    acquired = backend.acquired
+    count = duplicates.count()
+    count_acquisitions = backend.acquired - acquired
+
+    acquired = backend.acquired
+    combined = duplicates.all_snapshots_with_text()
+    combined_acquisitions = backend.acquired - acquired
+
+    assert len(combined) == count == DUPLICATE_COUNT
+    # One traversal for both pieces of data, not one for snapshots plus a
+    # second, independent one for text (which all_snapshots() then
+    # all_text_contents() back to back would cost).
+    assert combined_acquisitions == count_acquisitions
+    assert runtime.live_ref_count == 0
+    assert backend.live_cookies == frozenset()
+    assert backend.acquired == backend.released
+
+
+def test_all_text_contents_prefers_accessible_text_then_description_then_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = FakeNode(
+        name="Fixture",
+        role_en_us="frame",
+        states_en_us="enabled,visible,showing",
+        children=[
+            FakeNode(
+                name="app.form.field.0.label",
+                description="",
+                role_en_us="label",
+                states_en_us="enabled,visible,showing",
+                accessible_text=True,
+                text="Live AccessibleText",
+            ),
+            FakeNode(
+                name="app.form.field.1.label",
+                description="From description",
+                role_en_us="label",
+                states_en_us="enabled,visible,showing",
+            ),
+            FakeNode(
+                name="app.form.field.2.label",
+                description="",
+                role_en_us="label",
+                states_en_us="enabled,visible,showing",
+            ),
+        ],
+    )
+    backend = FakeBackend({HWND: tree})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    with PlayJab(timeout=0) as api:
+        window = api.attach(pid=PID).window()
+        fields = window.locator(name=contains("app.form"), role="label")
+        # AccessibleText wins over description when the interface is present
+        # (matches text_content()'s own precedence), otherwise description,
+        # otherwise name (field 2's name doubles as its own fallback here) -
+        # read for all three in one traversal.
+        assert fields.all_text_contents() == [
+            "Live AccessibleText",
+            "From description",
+            "app.form.field.2.label",
+        ]
+
+
+def test_all_text_contents_redacts_password_role_unlike_text_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = FakeNode(
+        name="Fixture",
+        role_en_us="frame",
+        states_en_us="enabled,visible,showing",
+        children=[
+            FakeNode(
+                name=SECRET,
+                description=SECRET,
+                role_en_us="password text",
+                states_en_us="enabled,visible,showing",
+                accessible_text=True,
+                text=SECRET,
+            ),
+        ],
+    )
+    backend = FakeBackend({HWND: tree})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    with PlayJab(timeout=0) as api:
+        window = api.attach(pid=PID).window()
+        password = window.get_by_role("password text")
+        # Explicit single-field read on a known password field still returns
+        # the real value (documented text_content() contract); the bulk dump
+        # does not, since it may sweep up a password incidentally among
+        # unrelated matches rather than being a deliberate, targeted read.
+        assert password.text_content() == SECRET
+        assert password.all_text_contents() == ["<redacted>"]
+
+
 def test_snapshot_requires_exactly_one_match(
     locator_api: tuple[PlayJab, JavaWindow, BridgeRuntime, FakeBackend],
 ) -> None:
