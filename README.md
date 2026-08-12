@@ -168,6 +168,8 @@ play-jab-skill --force    # overwrite an existing installation
 ## Documentation
 
 - [Getting Started](docs/getting-started.md)
+- [Design](docs/design.md) ([Russian](docs/design.ru.md)) — module/interface/seam
+  vocabulary applied to the actual stack, for contributors
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 

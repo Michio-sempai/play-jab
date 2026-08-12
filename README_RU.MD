@@ -163,6 +163,8 @@ play-jab-skill --force    # перезаписать существующую у
 ## Документация
 
 - [Начало работы](docs/getting-started.ru.md)
+- [Дизайн](docs/design.ru.md) ([English](docs/design.md)) — словарь
+  module/interface/seam, применённый к реальному стеку, для контрибьюторов
 - [Участие в разработке](CONTRIBUTING.md)
 - [История изменений](CHANGELOG.md)
 
