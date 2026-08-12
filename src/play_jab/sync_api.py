@@ -62,6 +62,9 @@ _MAX_TREE_DEPTH = 100
 _MAX_TREE_NODES = 20_000
 _DIAGNOSTIC_DEPTH = 3
 _DIAGNOSTIC_NODES = 50
+# `_strict()` only ever distinguishes 0 / 1 / "more than one" match; a scan
+# never needs to walk past the second match just to confirm ambiguity.
+_STRICT_MATCH_LIMIT = 2
 _PASSWORD_ROLE = "password text"
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
@@ -1747,14 +1750,14 @@ class Locator:
         self._operate(wheel, timeout=timeout, actionable=True)
 
     def is_visible(self) -> bool:
-        matches = self._resolve_immediate()
+        matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
         if not matches:
             return False
         match = self._strict(matches)
         return "visible" in match.snapshot.states
 
     def is_enabled(self) -> bool:
-        matches = self._resolve_immediate()
+        matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
         if not matches:
             return False
         match = self._strict(matches)
@@ -1767,7 +1770,7 @@ class Locator:
         deadline = time.monotonic() + wait / 1_000
         while True:
             try:
-                matches = self._resolve_immediate()
+                matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
             except _StaleLocatorError:
                 matches = []
             if self._condition(state, matches):
@@ -1796,7 +1799,7 @@ class Locator:
         started = deadline - timeout / 1_000
         while True:
             try:
-                matches = self._resolve_immediate()
+                matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
             except _StaleLocatorError:
                 matches = []
             if matches:
@@ -1871,8 +1874,16 @@ class Locator:
             scan_limit = None
             if step.position is not None and step.position >= 0:
                 scan_limit = step.position + 1
-            elif step_index == last_step:
-                scan_limit = match_limit
+            elif step.position is None:
+                # `.last()` (position == -1) needs the true total, so it
+                # always falls through to an unbounded scan below. Every
+                # other unpositioned step is narrowed by `_strict()` right
+                # after -- the last step by its caller-supplied match_limit,
+                # every earlier (parent-narrowing) step unconditionally,
+                # since `_strict(parents)` is always applied to it too.
+                scan_limit = (
+                    match_limit if step_index == last_step else _STRICT_MATCH_LIMIT
+                )
             # Only the final step's matches are ever returned — reading text
             # for intermediate (parent-narrowing) matches would be wasted work.
             step_read_text = read_text and step_index == last_step
@@ -2047,7 +2058,9 @@ class Locator:
     ) -> AccessibilityNode:
         _tree_limits(max_depth, max_nodes)
         for attempt in range(2):
-            match = self._strict(self._resolve_immediate())
+            match = self._strict(
+                self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
+            )
             try:
                 return self._tree_for_match(match, max_depth, max_nodes)
             except (_StaleContext, NativeCallError):

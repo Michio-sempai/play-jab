@@ -810,3 +810,118 @@ def test_max_depth_skips_a_heavy_showing_sibling_before_a_shallow_target(
         assert runtime.live_ref_count == 0
     finally:
         api.close()
+
+
+def _wide_tree_with_duplicates(sibling_count: int) -> FakeNode:
+    """A root panel with two identically-named "dupe" leaves among many."""
+    children = [
+        FakeNode(
+            name="dupe",
+            role_en_us="push button",
+            states_en_us="enabled,visible,showing",
+        )
+        for _ in range(2)
+    ]
+    children += [
+        FakeNode(
+            name=f"leaf-{index}",
+            role_en_us="push button",
+            states_en_us="enabled,visible,showing",
+        )
+        for index in range(sibling_count)
+    ]
+    return FakeNode(
+        name="root",
+        role_en_us="panel",
+        states_en_us="enabled,visible,showing",
+        children=children,
+    )
+
+
+def test_ambiguous_leaf_locator_scan_cost_does_not_grow_with_tree_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `_strict()` only distinguishes 0/1/"more than one" match, so
+    an ambiguous locator must stop scanning shortly after the second match --
+    not pay for every remaining sibling, however many there are."""
+    costs = []
+    for sibling_count in (48, 2_000):
+        backend = FakeBackend({HWND: _wide_tree_with_duplicates(sibling_count)})
+        api, window, _ = _window_for_backend(monkeypatch, backend)
+        try:
+            acquired = backend.acquired
+            with pytest.raises(StrictModeViolation):
+                window.get_by_name("dupe").is_visible()
+            costs.append(backend.acquired - acquired)
+        finally:
+            api.close()
+    assert costs[0] == costs[1]
+
+
+def test_ambiguous_parent_step_scan_cost_does_not_grow_with_tree_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as above, but for a parent-narrowing (non-final) step:
+    `window.get_by_name("group").get_by_name(...)` must confirm "group" is
+    ambiguous without scanning every one of the other root-level siblings."""
+    costs = []
+    for sibling_count in (48, 2_000):
+        groups = [
+            FakeNode(
+                name="group", role_en_us="panel", states_en_us="enabled,visible,showing"
+            )
+            for _ in range(2)
+        ]
+        groups += [
+            FakeNode(
+                name=f"other-{index}",
+                role_en_us="panel",
+                states_en_us="enabled,visible,showing",
+            )
+            for index in range(sibling_count)
+        ]
+        root = FakeNode(
+            name="root",
+            role_en_us="frame",
+            states_en_us="enabled,visible,showing",
+            children=groups,
+        )
+        backend = FakeBackend({HWND: root})
+        api, window, _ = _window_for_backend(monkeypatch, backend)
+        try:
+            acquired = backend.acquired
+            with pytest.raises(StrictModeViolation):
+                window.get_by_name("group").get_by_name("whatever").count()
+            costs.append(backend.acquired - acquired)
+        finally:
+            api.close()
+    assert costs[0] == costs[1]
+
+
+def test_last_still_returns_the_true_last_match_among_many_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: capping ambiguity-detection scans at a couple of
+    matches (above) must never apply to `.last()` -- it needs the true total
+    to know which match is actually last, not just the second one found."""
+    children = [
+        FakeNode(
+            name="dupe",
+            description=f"copy-{index}",
+            role_en_us="push button",
+            states_en_us="enabled,visible,showing",
+        )
+        for index in range(5)
+    ]
+    root = FakeNode(
+        name="root",
+        role_en_us="panel",
+        states_en_us="enabled,visible,showing",
+        children=children,
+    )
+    backend = FakeBackend({HWND: root})
+    api, window, _ = _window_for_backend(monkeypatch, backend)
+    try:
+        assert window.get_by_name("dupe").last().snapshot().description == "copy-4"
+    finally:
+        api.close()
