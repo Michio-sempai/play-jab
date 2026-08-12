@@ -29,4 +29,12 @@ htmlcov/
 # Agent-only working notes, not part of the published project
 .todo/
 
+# Personal Claude Code skills installed via an external skill manager,
+# not specific to this project (project-specific skills like
+# .claude/skills/release-cycle are still tracked).
+/.agents/
+/skills-lock.json
+/.claude/skills/*
+!/.claude/skills/release-cycle/
+
 coverage.xml
