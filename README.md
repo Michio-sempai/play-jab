@@ -89,6 +89,9 @@ case-sensitive matching. Locators are lazy and acquire fresh JAB contexts for
 every operation; snapshots and accessibility trees contain copied metadata and
 do not own Java references. Closing any or all `PlayJab` sessions leaves every
 attached process alive. There is intentionally no `PlayJab.launch()`.
+`PlayJab.list_windows()` enumerates every currently visible top-level Java
+window as cheap `JavaWindowInfo(hwnd, pid, title)` records — no JAB context is
+opened.
 
 `JavaWindow.snapshot()` reads only the window root. `Locator.exists()` is an
 immediate, non-strict first-match check; use `wait_for()` when polling is

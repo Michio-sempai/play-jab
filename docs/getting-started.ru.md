@@ -55,6 +55,17 @@ python -c "import play_jab; print(play_jab.__file__)"
 HWND, PID или точному заголовку top-level окна. `PlayJab` работает только через
 attach, а его закрытие никогда не завершает целевой процесс.
 
+Если HWND, PID или точный заголовок заранее неизвестны, сначала обнаружьте их:
+
+```python
+for info in jab.list_windows():
+    print(info.hwnd, info.pid, info.title)
+```
+
+`list_windows()` перечисляет все видимые сейчас top-level Java-окна как
+дешёвые записи `JavaWindowInfo(hwnd, pid, title)`; JAB context при этом не
+открывается.
+
 ```python
 from play_jab import PlayJab
 

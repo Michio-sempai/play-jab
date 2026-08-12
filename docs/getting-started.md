@@ -56,6 +56,16 @@ Start the Java application yourself, then attach by exactly one HWND, PID, or
 exact top-level title. `PlayJab` is attach-only and closing it never terminates
 the target process.
 
+If the HWND, PID, or exact title is not already known, discover it first:
+
+```python
+for info in jab.list_windows():
+    print(info.hwnd, info.pid, info.title)
+```
+
+`list_windows()` enumerates every currently visible top-level Java window as
+cheap `JavaWindowInfo(hwnd, pid, title)` records; it never opens a JAB context.
+
 ```python
 from play_jab import PlayJab
 

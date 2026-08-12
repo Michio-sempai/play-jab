@@ -93,7 +93,9 @@ below it and never leaks its own abstractions upward:
    `PlayJab`, `JavaApplication`, `JavaWindow`, `Locator`, `TableLocator`,
    `TableCellLocator`, `WindowExpectation`, snapshot dataclasses
    (`ElementSnapshot`, `AccessibilityNode`, `TableSnapshot`,
-   `AccessibleValueSnapshot`). This is also where the opt-in synthetic-input
+   `AccessibleValueSnapshot`), and `JavaWindowInfo` (the cheap
+   hwnd/pid/title record `PlayJab.list_windows()` returns for window
+   discovery, without opening a JAB context). This is also where the opt-in synthetic-input
    path lives (Win32 mouse/cursor/DPI handling, serialized by
    `_SYNTHETIC_INPUT_LOCK`), used for controls that open native modal dialogs
    JAB's `AccessibleAction` can't safely drive.

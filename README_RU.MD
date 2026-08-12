@@ -89,7 +89,9 @@ with PlayJab(timeout=5_000, dll_path=r"C:\JAB\WindowsAccessBridge-64.dll") as ja
 JAB context для каждой операции; snapshots и accessibility tree содержат только
 скопированные метаданные и не владеют Java-ссылками. Закрытие одной или всех
 сессий `PlayJab` оставляет attached-процессы живыми. Метода `PlayJab.launch()`
-намеренно нет.
+намеренно нет. `PlayJab.list_windows()` перечисляет все видимые сейчас
+top-level Java-окна как дешёвые записи `JavaWindowInfo(hwnd, pid, title)` — без
+открытия JAB context.
 
 `JavaWindow.snapshot()` читает только корень окна. `Locator.exists()` —
 немедленная нестрогая проверка первого совпадения; для ожидания используйте
