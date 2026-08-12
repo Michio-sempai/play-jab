@@ -47,6 +47,7 @@ __all__ = [
     "ElementSnapshot",
     "JavaApplication",
     "JavaWindow",
+    "JavaWindowInfo",
     "Locator",
     "PlayJab",
     "TableCellLocator",
@@ -170,6 +171,24 @@ class AccessibilityNode:
     @property
     def states(self) -> frozenset[str]:
         return self.snapshot.states
+
+
+@dataclass(frozen=True, slots=True)
+class JavaWindowInfo:
+    """One enumerable top-level Java window, identified only by HWND.
+
+    Carries no JAB accessibility data (no :class:`ElementSnapshot`).
+    Populating one costs only Win32 enumeration plus the ``is_java_window``
+    probe and raw title/pid lookups already paid by ``attach``/``window``
+    internally; it never opens an ``AccessibleContext``. Callers that also
+    need root accessibility metadata should follow up with
+    ``application.window(hwnd=...).snapshot()`` for the one window they
+    picked, not for every enumerated window.
+    """
+
+    hwnd: int
+    pid: int
+    title: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,6 +597,24 @@ class PlayJab:
             return self._application(pid)
         window = self._wait_window(hwnd=hwnd, title=title, timeout=wait)
         return self._application(self._windows.get_window_pid(window))
+
+    def list_windows(self) -> list[JavaWindowInfo]:
+        """Enumerate every currently visible top-level Java window.
+
+        Cheap by design: reuses the same Win32 enumeration and
+        ``is_java_window`` probe ``attach(title=...)`` already performs, and
+        never opens an ``AccessibleContext``. Starts the runtime like
+        ``attach()`` does; raises ``BridgeClosedError`` once closed.
+        """
+        self._ensure_started()
+        return [
+            JavaWindowInfo(
+                hwnd=hwnd,
+                pid=self._windows.get_window_pid(hwnd),
+                title=self._windows.get_window_title(hwnd),
+            )
+            for hwnd in self._java_windows()
+        ]
 
     def _application(self, pid: int | None) -> JavaApplication:
         if pid is None:

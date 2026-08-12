@@ -8,11 +8,12 @@ from play_jab import sync_api
 from play_jab._native.bridge import BridgeRuntime
 from play_jab._native.fake import FakeBackend, FakeNode
 from play_jab.exceptions import (
+    BridgeClosedError,
     JavaProcessExitedError,
     JavaWindowAmbiguousError,
     JavaWindowNotFoundError,
 )
-from play_jab.sync_api import PlayJab
+from play_jab.sync_api import JavaWindowInfo, PlayJab
 
 from .conftest import FakeWindowBackend
 
@@ -201,3 +202,45 @@ def test_window_selector_validation_precedes_window_enumeration(
             with pytest.raises(ValueError):
                 application.window(**arguments)
             assert windows.enum_calls == before
+
+
+def test_list_windows_returns_hwnd_pid_title_for_every_java_window(
+    api_backends: tuple[
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
+    ],
+) -> None:
+    api, _, _, _, _ = api_backends
+    with api:
+        result = api.list_windows()
+    assert result == [
+        JavaWindowInfo(hwnd=HWND, pid=PID, title="Main"),
+        JavaWindowInfo(hwnd=OTHER_HWND, pid=OTHER_PID, title="Main"),
+    ]
+
+
+def test_list_windows_excludes_non_java_hwnds(
+    api_backends: tuple[
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
+    ],
+) -> None:
+    api, _, _, windows, _ = api_backends
+    non_java_hwnd = 0xBEEF
+    windows.titles[non_java_hwnd] = "Notepad"
+    windows.pids[non_java_hwnd] = 111
+    windows.visible.append(non_java_hwnd)  # absent from FakeBackend roots
+    with api:
+        result = api.list_windows()
+    assert non_java_hwnd not in [info.hwnd for info in result]
+
+
+def test_list_windows_starts_the_runtime_and_respects_close(
+    api_backends: tuple[
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
+    ],
+) -> None:
+    api, _, _, _, _ = api_backends
+    result = api.list_windows()  # auto-starts, no `with` needed
+    assert result
+    api.close()
+    with pytest.raises(BridgeClosedError):
+        api.list_windows()
