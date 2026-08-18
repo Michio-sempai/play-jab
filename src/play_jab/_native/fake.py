@@ -199,12 +199,18 @@ class FakeBackend:
         self._index_tree(child, parent=parent, index_in_parent=len(parent.children) - 1)
 
     def remove_last_child(self, parent: FakeNode) -> None:
-        """Detach the most recently added child, undoing :meth:`add_child`."""
+        """Detach the most recently added child, undoing :meth:`add_child`.
+
+        ``FakeNode`` is a plain dataclass, so ``list.remove()`` would match by
+        structural equality and could unpin an unrelated, merely
+        identical-looking sibling instead of this one - the same trap
+        ``_parents``/``_indexes`` avoid by keying on ``id()``.
+        """
         child = parent.children.pop()
         key = id(child)
         del self._parents[key]
         del self._indexes[key]
-        self._pinned.remove(child)
+        self._pinned[:] = [node for node in self._pinned if node is not child]
 
     def _resolve(self, vm_id: int, context: int) -> FakeNode | None:
         """The node behind a cookie, or ``None`` if that context went stale.

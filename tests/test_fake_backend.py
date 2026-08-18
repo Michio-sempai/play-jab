@@ -360,3 +360,71 @@ def test_the_factory_hands_back_the_very_instance_it_returned() -> None:
     assert factory() is backend
     assert factory() is backend
     assert backend.vm_id == WRONG_VM_ID
+
+
+# -- tree mutators (add_child / remove_last_child) --------------------------
+
+
+def test_add_child_makes_the_new_node_readable_at_its_index(
+    backend: FakeBackend,
+) -> None:
+    root = backend._windows[WINDOW_HWND]
+    child = FakeNode(name="New", role_en_us="label")
+
+    backend.add_child(root, child)
+
+    context = backend.get_accessible_child_from_context(
+        backend.vm_id, context_of(backend, WINDOW_HWND), len(root.children) - 1
+    )
+    info = backend.get_accessible_context_info(backend.vm_id, context)
+    assert info is not None
+    assert info.name == "New"
+    assert info.index_in_parent == len(root.children) - 1
+
+
+def test_remove_last_child_unpins_the_correct_node_even_among_duplicates(
+    backend: FakeBackend,
+) -> None:
+    """Regression: ``FakeNode`` is a plain dataclass, so a value-equality
+    removal (``list.remove()``) would unpin whichever *structurally*
+    identical sibling comes first, not necessarily the one actually detached
+    from the tree - exactly the trap ``_parents``/``_indexes`` sidestep by
+    keying on ``id()`` instead."""
+    root = backend._windows[WINDOW_HWND]
+    first = FakeNode(name="Dup", role_en_us="label")
+    second = FakeNode(name="Dup", role_en_us="label")
+    assert first == second
+    assert first is not second
+    backend.add_child(root, first)
+    backend.add_child(root, second)
+
+    backend.remove_last_child(root)
+
+    # `in`/`not in` would use `__eq__`, the same structural-equality trap
+    # this test exists to catch - identity is checked explicitly instead.
+    pinned_ids = {id(node) for node in backend._pinned}
+    assert root.children[-1] is first
+    assert id(first) in pinned_ids
+    assert id(second) not in pinned_ids
+    assert id(second) not in backend._parents
+    assert id(second) not in backend._indexes
+    assert id(first) in backend._parents
+
+
+def test_remove_last_child_shrinks_the_readable_tree(backend: FakeBackend) -> None:
+    root = backend._windows[WINDOW_HWND]
+    child = FakeNode(name="Temporary", role_en_us="label")
+    backend.add_child(root, child)
+    before = len(root.children)
+
+    backend.remove_last_child(root)
+
+    assert len(root.children) == before - 1
+    context = context_of(backend, WINDOW_HWND)
+    last_index = len(root.children) - 1
+    remaining = backend.get_accessible_child_from_context(
+        backend.vm_id, context, last_index
+    )
+    info = backend.get_accessible_context_info(backend.vm_id, remaining)
+    assert info is not None
+    assert info.name != "Temporary"
