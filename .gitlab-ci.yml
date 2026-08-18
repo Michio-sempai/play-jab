@@ -52,6 +52,18 @@ mypy:
   script:
     - uv run --group lint mypy src
 
+codespell:
+  extends: [.uv-image, .uv-cache]
+  stage: lint
+  script:
+    - uv run --group lint codespell .
+
+import-linter:
+  extends: [.uv-image, .uv-cache]
+  stage: lint
+  script:
+    - uv run --group lint lint-imports
+
 commitizen-check:
   extends: [.uv-image, .uv-cache]
   stage: lint
@@ -72,8 +84,8 @@ test:
     - >-
       uv run --python "$PYTHON_VERSION" --group test pytest
       --ignore=tests/integration
-      --cov-report=xml --junitxml=junit.xml
-  coverage: '/TOTAL.*\s+(\d+%)$/'
+      --cov-report=xml --cov-report=term --junitxml=junit.xml
+  coverage: '/TOTAL.*\s+(\d+(?:\.\d+)?%)$/'
   artifacts:
     when: always
     reports:

@@ -7,8 +7,9 @@ import queue
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
+from enum import IntFlag
 from types import TracebackType
 from typing import TypeVar, cast
 
@@ -32,7 +33,14 @@ from play_jab.exceptions import (
     NativeCallError,
 )
 
-__all__ = ["DEFAULT_PUMP_INTERVAL", "DEFAULT_READY_TIMEOUT", "BridgeRuntime"]
+__all__ = [
+    "DEFAULT_PUMP_INTERVAL",
+    "DEFAULT_READY_TIMEOUT",
+    "BridgeRuntime",
+    "TextReader",
+    "Verdict",
+    "Visitor",
+]
 
 _T = TypeVar("_T")
 
@@ -45,6 +53,28 @@ DEFAULT_PUMP_INTERVAL = 0.01
 _INITIAL_PROBE_DELAY = 0.005
 _MAX_PROBE_DELAY = 0.2
 _CLOSED_MESSAGE = "bridge runtime is closed"
+_PUMP_EVERY_NODES = 64
+"""Nodes a batched traversal may visit before servicing the message pump."""
+
+_MANAGES_DESCENDANTS = "manages descendants"
+
+
+class Verdict(IntFlag):
+    """What a traversal visitor wants done with the node it was just given."""
+
+    DESCEND = 0
+    SKIP_CHILDREN = 1
+    STOP = 2
+
+
+TextReader = Callable[[], "str | None"]
+"""Reads ``AccessibleText`` for the node currently being visited."""
+
+Visitor = Callable[
+    ["tuple[int, ...]", int, ContextInfo, TextReader],
+    Verdict,
+]
+"""Called once per node, on the worker thread, with its path and attributes."""
 
 
 class _Call:
@@ -73,6 +103,177 @@ def _probe_java_window(backend: NativeBackend, probe_hwnd: int) -> bool:
         return backend.is_java_window(probe_hwnd)
     except OSError:
         return False
+
+
+def _no_visit(
+    path: tuple[int, ...],
+    depth: int,
+    info: ContextInfo,
+    text: TextReader,
+) -> Verdict:
+    """Placeholder visitor for walks that only descend a known path."""
+    raise AssertionError("path reads never visit nodes")
+
+
+class _Traversal:
+    """One batched depth-first walk over a JAB tree, on the worker thread.
+
+    Exists so that a whole subtree costs a single worker round-trip instead of
+    three per node (child, context info, release). Nothing here creates a
+    :class:`JavaRef`: cookies live and die inside one native step, so the
+    ownership ledger never grows by thousands of entries for a scan that owns
+    nothing beyond its own frame.
+    """
+
+    __slots__ = ("_backend", "_since_pump", "_visit", "_vm_id")
+
+    def __init__(self, backend: NativeBackend, vm_id: int, visit: Visitor) -> None:
+        self._backend = backend
+        self._vm_id = vm_id
+        self._visit = visit
+        self._since_pump = 0
+
+    def run(self, root: int, start_path: Sequence[int]) -> None:
+        """Walk the subtree rooted at ``start_path`` below the window context."""
+        cookie = root
+        owned: int | None = None
+        try:
+            for index in start_path:
+                child = self.child(cookie, index)
+                if owned is not None:
+                    self.release(owned)
+                owned = child
+                cookie = child
+            self._walk(cookie, tuple(start_path), 0, None)
+        finally:
+            if owned is not None:
+                self.release(owned)
+
+    def descend(
+        self, root: int, path: Sequence[int], *, read_text: bool = False
+    ) -> tuple[tuple[ContextInfo, ...], str | None]:
+        """Read the nodes along ``path`` without visiting anything else."""
+        cookie = root
+        owned: int | None = None
+        try:
+            infos = [self.info(root)]
+            for index in path:
+                child = self.child(cookie, index)
+                if owned is not None:
+                    self.release(owned)
+                owned = child
+                cookie = child
+                infos.append(self.info(child))
+            return tuple(infos), self.text(cookie) if read_text else None
+        finally:
+            if owned is not None:
+                self.release(owned)
+
+    def _walk(
+        self,
+        cookie: int,
+        path: tuple[int, ...],
+        depth: int,
+        info: ContextInfo | None,
+    ) -> bool:
+        """Visit one node and, unless told otherwise, its children. True = stop."""
+        if info is None:
+            info = self.info(cookie)
+        self._pump()
+        verdict = self._visit(path, depth, info, lambda: self.text(cookie))
+        if verdict & Verdict.STOP:
+            return True
+        if verdict & Verdict.SKIP_CHILDREN:
+            return False
+        return self._children(cookie, path, depth, info)
+
+    def _children(
+        self,
+        cookie: int,
+        path: tuple[int, ...],
+        depth: int,
+        info: ContextInfo,
+    ) -> bool:
+        if _MANAGES_DESCENDANTS in info.states_en_us:
+            visible = self._backend.get_visible_children(self._vm_id, cookie)
+            if visible is not None:
+                return self._walk_visible(visible, path, depth)
+        for index in range(info.children_count):
+            child = self.child(cookie, index)
+            try:
+                if self._walk(child, (*path, index), depth + 1, None):
+                    return True
+            finally:
+                self.release(child)
+        return False
+
+    def _walk_visible(
+        self,
+        visible: tuple[int, ...],
+        path: tuple[int, ...],
+        depth: int,
+    ) -> bool:
+        """Descend a "manages descendants" container by its visible children.
+
+        Their positions come from ``indexInParent`` rather than the loop
+        counter: the paths handed to the visitor have to stay usable as
+        ``getAccessibleChildFromContext`` indices afterwards.
+        """
+        children = tuple(child for child in visible if child)
+        try:
+            for child in children:
+                child_info = self.info(child)
+                index = child_info.index_in_parent
+                if index < 0:
+                    raise NativeCallError(
+                        "getAccessibleIndexInParent",
+                        vmID=self._vm_id,
+                        ac=child,
+                    )
+                if self._walk(child, (*path, index), depth + 1, child_info):
+                    return True
+        finally:
+            for child in reversed(children):
+                self.release(child)
+        return False
+
+    def info(self, cookie: int) -> ContextInfo:
+        info = self._backend.get_accessible_context_info(self._vm_id, cookie)
+        if info is None:
+            raise NativeCallError(
+                "getAccessibleContextInfo", vmID=self._vm_id, ac=cookie
+            )
+        return info
+
+    def child(self, cookie: int, index: int) -> int:
+        child = self._backend.get_accessible_child_from_context(
+            self._vm_id, cookie, index
+        )
+        if not child:
+            raise NativeCallError(
+                "getAccessibleChildFromContext",
+                vmID=self._vm_id,
+                ac=cookie,
+                index=index,
+            )
+        return child
+
+    def text(self, cookie: int) -> str | None:
+        return self._backend.get_accessible_text(self._vm_id, cookie)
+
+    def release(self, cookie: int) -> None:
+        self._backend.release_java_object(self._vm_id, cookie)
+
+    def _pump(self) -> None:
+        """Keep the bridge's message window serviced during a long batch.
+
+        The worker pumps between queued calls; a traversal that stays inside a
+        single call for seconds would otherwise stop dispatching entirely.
+        """
+        self._since_pump += 1
+        if self._since_pump >= _PUMP_EVERY_NODES:
+            self._since_pump = 0
+            self._backend.pump_messages()
 
 
 class BridgeRuntime:
@@ -438,25 +639,34 @@ class BridgeRuntime:
 
         return self._submit(operation)
 
+    def _window_context(self, backend: NativeBackend, hwnd: int) -> tuple[int, int]:
+        """Resolve a window to ``(vm_id, cookie)``; the cookie is unowned.
+
+        Worker-side only. The caller becomes responsible for releasing the
+        cookie - either by wrapping it in a :class:`JavaRef` via :meth:`_own`
+        or by handing it back to the backend itself.
+        """
+        known_vm = self._window_vms.get(hwnd)
+        if known_vm is not None and known_vm in self._dead_vms:
+            raise JavaVmExitedError(f"JVM vmID {known_vm} has exited")
+        if not backend.is_java_window(hwnd):
+            raise JavaWindowNotFoundError(
+                f"window {hwnd:#x} is not a Java window, or no longer exists"
+            )
+        found = backend.get_accessible_context_from_hwnd(hwnd)
+        if found is None:
+            raise JavaWindowNotAccessibleError(
+                f"window {hwnd:#x} is a Java window but exposes no accessible context"
+            )
+        vm_id, value = found
+        self._window_vms[hwnd] = vm_id
+        return vm_id, value
+
     def context_from_hwnd(self, hwnd: int) -> JavaRef:
         """Attach to a top-level window; returns a newly owned reference."""
 
         def operation(backend: NativeBackend) -> JavaRef:
-            known_vm = self._window_vms.get(hwnd)
-            if known_vm is not None and known_vm in self._dead_vms:
-                raise JavaVmExitedError(f"JVM vmID {known_vm} has exited")
-            if not backend.is_java_window(hwnd):
-                raise JavaWindowNotFoundError(
-                    f"window {hwnd:#x} is not a Java window, or no longer exists"
-                )
-            found = backend.get_accessible_context_from_hwnd(hwnd)
-            if found is None:
-                raise JavaWindowNotAccessibleError(
-                    f"window {hwnd:#x} is a Java window but exposes no "
-                    f"accessible context"
-                )
-            vm_id, value = found
-            self._window_vms[hwnd] = vm_id
+            vm_id, value = self._window_context(backend, hwnd)
             return self._own(vm_id, value)
 
         return self._call(operation)
@@ -716,6 +926,69 @@ class BridgeRuntime:
             if children is None:
                 return None
             return tuple(self._own(vm_id, child) for child in children if child)
+
+        return self._call(operation)
+
+    def traverse(
+        self,
+        hwnd: int,
+        start_path: Sequence[int],
+        visit: Visitor,
+    ) -> None:
+        """Walk a window subtree depth-first, entirely inside one worker step.
+
+        ``visit`` is called for the node at ``start_path`` and then, in
+        depth-first order, for every descendant, with its path relative to the
+        window root, its depth relative to the start node, its
+        :class:`ContextInfo`, and a reader for its ``AccessibleText``. The
+        returned :class:`Verdict` decides whether the walk descends into that
+        node, skips its subtree, or stops altogether.
+
+        ``visit`` runs on the worker thread, in the middle of a native step, so
+        it must stay pure: calling back into the runtime from it would re-enter
+        the backend from inside its own call. Raising from it is supported and
+        aborts the walk with every cookie released.
+
+        There is deliberately no node or depth budget here - the visitor is
+        handed both and is the layer that knows what its own limits mean.
+        """
+
+        def operation(backend: NativeBackend) -> None:
+            vm_id, root = self._window_context(backend, hwnd)
+            try:
+                _Traversal(backend, vm_id, visit).run(root, start_path)
+            finally:
+                backend.release_java_object(vm_id, root)
+
+        self._call(operation)
+
+    def read_path(
+        self,
+        hwnd: int,
+        path: Sequence[int],
+        *,
+        read_text: bool = False,
+    ) -> tuple[tuple[ContextInfo, ...], str | None]:
+        """Read the nodes along one known child-index path, in one worker step.
+
+        Returns ``(infos, text)`` where ``infos`` holds the window root followed
+        by every node on ``path``, so ``infos[-1]`` describes the target.
+        ``text`` is that node's ``AccessibleText`` when ``read_text`` is set.
+
+        This is the cheap counterpart to :meth:`traverse`: one native call per
+        path element instead of one per node in the tree, which is what makes
+        re-checking a remembered locator path affordable.
+        """
+
+        def operation(
+            backend: NativeBackend,
+        ) -> tuple[tuple[ContextInfo, ...], str | None]:
+            vm_id, root = self._window_context(backend, hwnd)
+            walker = _Traversal(backend, vm_id, _no_visit)
+            try:
+                return walker.descend(root, path, read_text=read_text)
+            finally:
+                backend.release_java_object(vm_id, root)
 
         return self._call(operation)
 

@@ -45,6 +45,8 @@ class FakeWindowBackend:
         cursor: tuple[int, int] = (0, 0),
         dpi_context: int = 0,
         guard_input: bool = False,
+        on_key: Callable[[int], None] | None = None,
+        on_text: Callable[[str], None] | None = None,
     ) -> None:
         self.titles = dict(titles) if titles is not None else {DEFAULT_HWND: "Fixture"}
         self.pid = pid
@@ -53,9 +55,13 @@ class FakeWindowBackend:
         self.cursor = cursor
         self.dpi_context = dpi_context
         self.guard_input = guard_input
+        self.on_key = on_key
+        self.on_text = on_text
         self.calls: list[tuple[object, ...]] = []
         self.wheels: list[int] = []
         self.send_error: BaseException | None = None
+        self.key_errors: dict[int, BaseException] = {}
+        self.text_error: BaseException | None = None
         self.enum_calls = 0
 
     def enum_windows(self) -> list[int]:
@@ -102,6 +108,34 @@ class FakeWindowBackend:
         self._guard("send_mouse_wheel")
         self.calls.append(("wheel", delta))
         self.wheels.append(delta)
+
+    def send_key(self, vk_code: int) -> None:
+        self._guard("send_key")
+        self.calls.append(("key", vk_code))
+        error = self.key_errors.get(vk_code)
+        if error is not None:
+            raise error
+        if self.send_error is not None:
+            raise self.send_error
+        if self.on_key is not None:
+            self.on_key(vk_code)
+
+    def send_repeated_key(self, vk_code: int, count: int) -> None:
+        self._guard("send_repeated_key")
+        self.calls.append(("repeat_key", vk_code, count))
+        if self.send_error is not None:
+            raise self.send_error
+        if self.on_key is not None:
+            for _ in range(count):
+                self.on_key(vk_code)
+
+    def send_text(self, value: str) -> None:
+        self._guard("send_text")
+        self.calls.append(("text", value))
+        if self.text_error is not None:
+            raise self.text_error
+        if self.on_text is not None:
+            self.on_text(value)
 
 
 def install_fake_runtime(

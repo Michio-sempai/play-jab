@@ -19,8 +19,15 @@ against a real, already-running JVM.
   (`get_by_name`, etc.) do not do fuzzy or substring matching by default; use
   the `contains(...)` helper when partial matching is actually wanted.
 - **Locators are lazy.** Every locator operation re-resolves a fresh JAB
-  reference; nothing is cached across calls, and re-running a snapshot after
-  the UI changed is expected, not a smell.
+  reference, so re-running a snapshot after the UI changed is expected, not a
+  smell. What *is* remembered between calls is the child-index path a
+  single-node operation resolved to: the next call re-checks that path first
+  and only falls back to a tree scan when it stopped satisfying the chain.
+  That is a performance shortcut, not a stale cache — but it does mean
+  `StrictModeViolation` is reported by the scans rather than by every call.
+  A duplicate added after a warm lookup is therefore not discovered until the
+  path is invalidated/cleared. `PlayJab(path_cache=False)` restores exhaustive
+  resolution; the default thread-safe LRU holds at most 1,024 chains.
 - **Never import `play_jab._native`.** It is a private implementation layer
   with no stability guarantees. Only import from the `play_jab` package root
   (`PlayJab`, `JavaApplication`, `JavaWindow`, `Locator`, exceptions, `contains`).
@@ -80,7 +87,11 @@ ended up checked) before returning.
 
 `locator.as_table()` exposes a `TableLocator` with zero-based row/column
 indices: `row_count()`, `column_count()`, `snapshot()`, headers, row
-selection, `cell(row, col)`, and `cell(...).wait_for_text(value, timeout=...)`.
+selection, `cell(row, col)`, `cell(...).fill(value)`, and
+`cell(...).wait_for_text(value, timeout=...)`. Cell fill supports a visible
+standard Swing text editor and uses F2, Unicode keyboard input, Enter, then a
+JAB model postcondition; read-only/custom editors raise
+`UnsupportedActionError`.
 Reads work even on hidden rows; selecting/acting on a row follows the same
 visible/showing/enabled rule as any other action.
 

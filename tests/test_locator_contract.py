@@ -162,9 +162,9 @@ def test_max_depth_is_validated_before_traversal(
 ) -> None:
     _, window, _, backend = locator_api
     acquired = backend.acquired
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_depth must be a non-negative integer"):
         window.locator(max_depth=-1)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_depth must be a non-negative integer"):
         window.locator(max_depth=True)
     assert backend.acquired == acquired
 
@@ -541,7 +541,10 @@ def test_invalid_positional_indices_fail_before_traversal(
 ) -> None:
     _, window, _, backend = locator_api
     acquired = backend.acquired
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match="locator index must be a non-negative integer",
+    ):
         window.get_by_name("Duplicate").nth(index)
     assert backend.acquired == acquired
 
@@ -551,9 +554,9 @@ def test_role_and_state_validation_happens_before_traversal(
 ) -> None:
     _, window, _, backend = locator_api
     acquired = backend.acquired
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unsupported accessible role"):
         window.locator(role="application-specific")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unsupported accessible state"):
         window.locator(states=("application-specific",))
     assert backend.acquired == acquired
 
@@ -580,10 +583,10 @@ def test_accessibility_tree_honours_diagnostic_limits(
     assert len(tree.children) == 1
     assert runtime.live_ref_count == 0
     assert backend.live_cookies == frozenset()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_depth must be a non-negative integer"):
         window.accessibility_tree(max_depth=-1)
     for invalid in (0, -1):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="max_nodes must be a positive integer"):
             window.accessibility_tree(max_nodes=invalid)
 
 

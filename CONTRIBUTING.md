@@ -17,7 +17,11 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run flake8 src --select=WPS
 uv run mypy src
+uv run codespell .
+uv run lint-imports
 ```
+
+`codespell` checks common English misspellings with very few false positives.
 
 The same checks run in CI (`.gitlab-ci.yml`, `lint`/`test` stages). Pre-commit runs
 the lint checks locally; run `uv run pytest` separately for the test suite.

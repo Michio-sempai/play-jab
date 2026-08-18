@@ -86,9 +86,22 @@ def test_attach_requires_exactly_one_selector_before_discovery(
             {"pid": PID, "hwnd": HWND},
             {"pid": PID, "title": "Main"},
         ):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match=r"attach.*requires exactly one"):
                 api.attach(**arguments)
     assert windows.enum_calls == 0
+
+
+@pytest.mark.parametrize("path_cache", [None, 0, "yes"])
+def test_constructor_rejects_non_boolean_path_cache(
+    api_backends: tuple[
+        PlayJab, BridgeRuntime, FakeBackend, FakeWindowBackend, FakeProcesses
+    ],
+    path_cache: object,
+) -> None:
+    _api, _runtime, _backend, _windows, _processes = api_backends
+
+    with pytest.raises(ValueError, match="path_cache must be a bool"):
+        PlayJab(path_cache=path_cache)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -199,7 +212,7 @@ def test_window_selector_validation_precedes_window_enumeration(
             {"timeout": -1},
         ):
             before = windows.enum_calls
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match=r"accepts at most|must be"):
                 application.window(**arguments)
             assert windows.enum_calls == before
 

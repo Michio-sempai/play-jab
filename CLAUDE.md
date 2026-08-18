@@ -80,7 +80,10 @@ below it and never leaks its own abstractions upward:
    calls are marshaled onto that worker thread via a command queue; this is
    what makes the otherwise not-thread-safe backend safe to call from
    arbitrary caller threads. Turns raw backend failures into the public
-   exception hierarchy.
+   exception hierarchy. `traverse()` and `read_path()` are the batched
+   primitives: a whole subtree walk or a whole path read happens in a single
+   queued step instead of three per node, and neither mints a `JavaRef` --
+   cookies live and die inside that one step.
 6. **`src/play_jab/_native/refs.py`** — `JavaRef`: owns exactly one Access
    Bridge reference (an `AccessibleContext` is a live JVM reference the JVM
    cannot collect until `releaseJavaObject` is called, not a plain ID).
@@ -117,16 +120,32 @@ code (also enforced by docs/README).
 
 Locators (`Locator`, `TableLocator`, `TableCellLocator` in `sync_api.py`) are
 lazy: they resolve fresh JAB contexts on every operation rather than caching a
-tree. Key contracts to preserve when touching this code:
+tree. What is remembered is a *path*, not a context: an operation that acts on
+a single node stores the child-index path it resolved to (on `PlayJab`, keyed
+by hwnd plus locator chain), and the next such operation re-reads only that
+path via `BridgeRuntime.read_path`, falling back to a full scan the moment any
+step of the chain stops matching. The cache is a thread-safe 1,024-entry LRU;
+warm reads intentionally do not scan for newly added duplicates.
+`PlayJab(path_cache=False)` disables it;
+`clear_path_cache()` empties it. Key contracts to preserve when touching this
+code:
 
 - `exists()` is an immediate, non-strict first-match check; `wait_for()` is the
   polling variant.
 - **Reads** (snapshot, text content, attributes, table cells) work on hidden or
   disabled nodes. **Actions** (click, fill, etc.) require the target *and every
   ancestor* to be visible, showing, and enabled.
-- `showing_only=True` matches showing nodes and prunes non-showing subtrees;
-  `visible_only=True` filters without pruning. `max_depth=` caps descent
-  relative to the locator's own starting point (not the tree root).
+- `showing_only=True` matches showing nodes and prunes non-showing subtrees,
+  including the subtree of a `collapsed` node (its descendants are never
+  rendered, and reading them one by one is what made an unrelated search pay
+  for a thousand-row tree); `visible_only=True` filters without pruning.
+  `max_depth=` caps descent relative to the locator's own starting point (not
+  the tree root).
+- A whole scan runs inside **one** worker-thread step via
+  `BridgeRuntime.traverse`, which calls a visitor per node and takes a
+  `Verdict` (descend / skip subtree / stop) back. The visitor runs on the
+  worker thread and must not call back into the runtime; node and depth
+  budgets belong to the visitor, not to `traverse`.
 - Virtualized lists/trees expose only currently materialized children;
   play-jab never auto-scrolls to search — callers must move the viewport and
   re-resolve.

@@ -18,6 +18,7 @@ import pytest
 
 from play_jab._native.bridge import BridgeRuntime
 from play_jab._native.fake import FakeBackend, FakeNode, fake_backend_factory
+from play_jab._native.refs import JavaRef
 from play_jab.exceptions import JavaReferenceClosedError, NativeCallError
 
 WINDOW_HWND = 0x2222
@@ -132,12 +133,16 @@ def test_a_scope_left_by_an_exception_still_releases(
     runtime: tuple[BridgeRuntime, FakeBackend],
 ) -> None:
     bridge, backend = runtime
+
+    def read_then_fail(root: JavaRef) -> None:
+        assert bridge.context_info(root).name == "Frame"
+        raise RuntimeError("boom")
+
     with (
         pytest.raises(RuntimeError, match="boom"),
         bridge.context_from_hwnd(WINDOW_HWND) as root,
     ):
-        assert bridge.context_info(root).name == "Frame"
-        raise RuntimeError("boom")
+        read_then_fail(root)
     assert backend.live_cookies == frozenset()
     assert bridge.live_ref_count == 0
 

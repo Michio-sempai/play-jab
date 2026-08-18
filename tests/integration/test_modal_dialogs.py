@@ -102,7 +102,8 @@ def test_semantic_click_blocks_for_a_and_b_then_jab_recovers(
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         application = _application(api, dialog_fixture)
         button = application.window(title=_OWNER_TITLE).get_by_name(button_name)
-        assert button.is_visible() and button.is_enabled()
+        assert button.is_visible()
+        assert button.is_enabled()
 
         _assert_semantic_click_blocks_until_window_closes(
             button,
@@ -122,9 +123,9 @@ def test_scenario_c_remains_accessible_and_closes_semantically(
         wait_for_raw_window(dialog_fixture.process, "Scenario C")
 
         dialog = application.window(title="Scenario C")
-        assert dialog.get_by_name("repro.invokeandwait.dialog").snapshot()
-        assert dialog.get_by_name("repro.invokeandwait.input").snapshot()
-        assert owner.get_by_name("repro.main").snapshot()
+        assert dialog.get_by_name("repro.invokeandwait.dialog").snapshot().role
+        assert dialog.get_by_name("repro.invokeandwait.input").snapshot().role
+        assert owner.get_by_name("repro.main").snapshot().role
         dialog.get_by_name("repro.invokeandwait.ok").click()
         _assert_owner_recovered(api, application, "Scenario C")
 
@@ -140,8 +141,8 @@ def test_modal_b_is_safe_with_window_expectation_and_physical_open_click(
             owner.get_by_name("repro.open_modal").click(opens_window=True)
 
         dialog = pending.value
-        assert dialog.get_by_name("repro.modal.input").snapshot()
-        assert owner.get_by_name("repro.main").snapshot()
+        assert dialog.get_by_name("repro.modal.input").snapshot().role
+        assert owner.get_by_name("repro.main").snapshot().role
         dialog.get_by_name("repro.modal.ok").click()
         _assert_owner_recovered(api, application, "Scenario B")
 
@@ -167,6 +168,7 @@ def test_nested_semantic_open_blocks_until_win32_close_then_recovers(
             application.window(title="Scenario C")
             .get_by_name("repro.invokeandwait.dialog")
             .snapshot()
+            .role
         )
         assert api.live_ref_count == 0
 
@@ -184,9 +186,9 @@ def test_nested_physical_open_keeps_nested_outer_and_owner_accessible(
             )
 
         nested = pending.value
-        assert nested.get_by_name("repro.nested.input").snapshot()
-        assert outer.get_by_name("repro.invokeandwait.dialog").snapshot()
-        assert owner.get_by_name("repro.main").snapshot()
+        assert nested.get_by_name("repro.nested.input").snapshot().role
+        assert outer.get_by_name("repro.invokeandwait.dialog").snapshot().role
+        assert owner.get_by_name("repro.main").snapshot().role
         nested.get_by_name("repro.nested.ok").click()
         wait_for_raw_window_closed(application.pid, "Scenario Nested")
         assert api.live_ref_count == 0
@@ -199,8 +201,8 @@ def test_dialog_first_is_a_diagnostic_not_a_causal_proof(
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         application = api.attach(pid=dialog_first_fixture.process.pid)
         dialog = application.window(title="Scenario First")
-        assert dialog.get_by_name("repro.first.dialog").snapshot()
-        assert dialog.get_by_name("repro.first.input").snapshot()
+        assert dialog.get_by_name("repro.first.dialog").snapshot().role
+        assert dialog.get_by_name("repro.first.input").snapshot().role
         assert api.live_ref_count == 0
 
     close_raw_window(dialog_first_fixture.hwnd)

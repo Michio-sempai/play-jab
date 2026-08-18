@@ -147,6 +147,7 @@ def test_synthetic_input_is_serialized_across_callers(
     release_first.set()
     first.join(timeout=2)
     second.join(timeout=2)
-    assert not first.is_alive() and not second.is_alive()
+    assert not first.is_alive()
+    assert not second.is_alive()
     assert completed == [None, None]
     assert call_count == CLICK_COUNT

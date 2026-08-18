@@ -155,13 +155,13 @@ def test_application_extensions_are_scoped_to_their_registry() -> None:
 
 @pytest.mark.parametrize("invalid", ["", 1, None])
 def test_invalid_role_extensions_are_rejected(invalid: object) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="extra roles must be non-empty strings"):
         AccessibilityRegistry(extra_roles=(invalid,))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("invalid", ["", 1, None])
 def test_invalid_state_extensions_are_rejected(invalid: object) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="extra states must be non-empty strings"):
         AccessibilityRegistry(extra_states=(invalid,))  # type: ignore[arg-type]
 
 

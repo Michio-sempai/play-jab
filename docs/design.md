@@ -130,13 +130,15 @@ complexity reappears — to the modules doing the most hiding:
   explicitly *not* load-bearing (deterministic release still happens through
   `close()`).
 - **`Locator`.** Delete it and every caller would inline: JAB context
-  re-resolution on every operation (locators are lazy, not cached), the
+  re-resolution on every operation (locators are lazy), the
   visible/showing/enabled ancestor-chain check actions require but reads
-  don't, `showing_only` pruning vs. `visible_only` filtering, and
-  `LocatorTimeoutError`'s bounded, password-redacted diagnostic capture. The
-  public surface is close to thirty methods across query/read/act/wait
-  families — wide for a "deep module," but it stays deep because each family
-  shares the same private resolution machinery (`_resolve_once`, `_walk`,
+  don't, `showing_only` pruning vs. `visible_only` filtering, the remembered
+  child-index path that lets a repeat resolution re-check a handful of nodes
+  instead of walking a tree of tens of thousands, and `LocatorTimeoutError`'s
+  bounded, password-redacted diagnostic capture. The public surface is close
+  to thirty methods across query/read/act/wait families — wide for a "deep
+  module," but it stays deep because each family shares the same private
+  resolution machinery (`_resolve_single`, `_resolve_once`, `_scan`,
   `_wait_strict`) rather than duplicating it, and no caller can reach that
   machinery directly.
 - **`RuntimeManager`/`RuntimeSession`.** Delete it and every `PlayJab`

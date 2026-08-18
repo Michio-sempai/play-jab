@@ -140,7 +140,8 @@ def test_timeout_diagnostic_is_structured_and_bounded(
     # `_RUNTIME_MANAGER` is a session-wide singleton whose generation counter
     # only grows, so an exact value here would depend on test execution order;
     # a positive int is the actual, order-independent contract.
-    assert error.generation is not None and error.generation >= 1
+    assert error.generation is not None
+    assert error.generation >= 1
     assert error.tree is not None
     tree_lines = error.tree.splitlines()
     assert 0 < len(tree_lines) <= sync_api._DIAGNOSTIC_NODES

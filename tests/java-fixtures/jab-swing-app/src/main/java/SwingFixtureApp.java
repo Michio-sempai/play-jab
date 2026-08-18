@@ -120,6 +120,7 @@ import javax.swing.tree.DefaultTreeModel;
  * fixture.table_add_row_button      JButton           100 -> 101 строк (см. fixture.table_row_count_status)
  * fixture.table_remove_row_button   JButton           101 -> 100 строк
  * fixture.table_row_count_status    JLabel            "rows=&lt;N&gt;", обновляется TableModelListener'ом
+ * fixture.table_edit_status         JLabel            подтверждённое значение editable cell(7, 3)
  * fixture.select_row_button         JButton           строка 7 + все 5 колонок (mixed mode)
  * fixture.select_column_button      JButton           колонка 3 + все 100 строк (mixed mode)
  * fixture.select_few_button         JButton           строки 1, 3, 5; column selection выключен
@@ -267,9 +268,10 @@ import javax.swing.tree.DefaultTreeModel;
  * строки 7, и для невидимой строки 99. Переход «ячейка не материализована →
  * действий нет; прокрутили → действие появилось» на этой fixture
  * <b>продемонстрировать невозможно</b> — это свойство самого Swing JTable, а не
- * недоделка. Проверять здесь можно только чтение данных и {@code showing};
- * ячейка как цель для {@code doAccessibleActions} не тестируется нигде в этой
- * fixture.
+ * недоделка. Редактируемая {@code cell(7, 3)} открывает стандартный
+ * {@code JTextField} по F2, а подтверждённое значение модели независимо
+ * публикуется в {@code fixture.table_edit_status}; AccessibleAction ячейки
+ * для этого не используется.
  *
  * <p><b>Прокрутка: как её проверять из play_jab, а не in-process.</b>
  * {@code fixture.table_scrollbar_vertical} действительно материализует строки
@@ -871,9 +873,9 @@ public final class SwingFixtureApp {
         return new DefaultTableModel(rows, COLUMN_NAMES) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                // Редактор ячейки подменял бы поддерево доступности на JTextField;
-                // значение меняется только через fixture.mark_done_button.
-                return false;
+                // Одна стандартная редактируемая ячейка нужна для сквозного
+                // теста renderer -> JTextField editor через Java Access Bridge.
+                return row == MUTABLE_ROW && column == STATUS_COLUMN;
             }
         };
     }
@@ -929,6 +931,20 @@ public final class SwingFixtureApp {
                 rowCountStatus, "rows=" + tableModel.getRowCount()));
         setLabelText(rowCountStatus, "rows=" + tableModel.getRowCount());
 
+        JLabel editStatus = new JLabel();
+        editStatus.getAccessibleContext().setAccessibleName("fixture.table_edit_status");
+        tableModel.addTableModelListener(event -> {
+            if (event.getFirstRow() <= MUTABLE_ROW
+                    && event.getLastRow() >= MUTABLE_ROW) {
+                setLabelText(
+                        editStatus,
+                        "cell=" + tableModel.getValueAt(MUTABLE_ROW, STATUS_COLUMN));
+            }
+        });
+        setLabelText(
+                editStatus,
+                "cell=" + tableModel.getValueAt(MUTABLE_ROW, STATUS_COLUMN));
+
         JButton selectRow = new JButton("Select row 7");
         selectRow.getAccessibleContext().setAccessibleName("fixture.select_row_button");
         selectRow.addActionListener(e -> {
@@ -976,6 +992,7 @@ public final class SwingFixtureApp {
         buttons.add(addExtraRow);
         buttons.add(removeExtraRow);
         buttons.add(rowCountStatus);
+        buttons.add(editStatus);
 
         setMixedSelectionMode();
 

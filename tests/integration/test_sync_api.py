@@ -12,6 +12,7 @@ from play_jab.exceptions import (
     JavaWindowAmbiguousError,
     JavaWindowNotFoundError,
     StrictModeViolation,
+    UnsupportedActionError,
 )
 from play_jab.sync_api import PlayJab, contains
 
@@ -182,7 +183,7 @@ def test_repeated_public_traversals_do_not_leak_native_references(
         baseline = api.live_ref_count
         for _ in range(_TRAVERSAL_REPETITIONS):
             assert window.get_by_name("fixture.scope_alpha").snapshot().name
-            assert window.get_by_name("fixture.scope_alpha").accessibility_tree()
+            assert window.get_by_name("fixture.scope_alpha").accessibility_tree().role
             assert "fixture.scope_alpha" in window.dump(max_depth=10)
             assert api.live_ref_count == baseline
         assert baseline == 0
@@ -237,6 +238,37 @@ def test_forms_and_table_api_round_trip_through_real_jab(
             username.clear()
             password.clear()
             remember.uncheck()
+
+
+def test_table_cell_fill_round_trips_through_standard_swing_editor(
+    swing_fixture: SwingFixture,
+) -> None:
+    with PlayJab(timeout=_API_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        table = window.get_by_name("fixture.table").as_table()
+        status = window.get_by_name("fixture.table_edit_status")
+        editable = table.cell(7, 3)
+        tabs.select_option(1)
+        try:
+            for iteration in range(20):
+                value = f"Правка {iteration} 世界"
+                editable.fill(value)
+                assert editable.text_content() == value
+                assert status.snapshot().description == f"cell={value}"
+
+            editable.fill("")
+            assert editable.text_content() == ""
+            assert status.snapshot().description == "cell="
+
+            with pytest.raises(
+                UnsupportedActionError, match="did not accept in-place editing"
+            ):
+                table.cell(7, 2).fill("read-only", timeout=500)
+            assert api.live_ref_count == 0
+        finally:
+            window.get_by_name("fixture.reset_table_button").click()
+            tabs.select_option(0)
 
 
 def test_virtualized_workloads_and_replacement_use_lazy_locators(

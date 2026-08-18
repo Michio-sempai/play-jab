@@ -234,12 +234,16 @@ def test_expect_window_reports_process_exit_and_preserves_body_exception(
 
         processes.alive = True
         original = RuntimeError("body failed")
+
+        def fail_after_dialog_appears() -> None:
+            windows.visible.append(DIALOG)
+            raise original
+
         with (
             pytest.raises(RuntimeError) as caught,
             application.expect_window(timeout=0),
         ):
-            windows.visible.append(DIALOG)
-            raise original
+            fail_after_dialog_appears()
         assert caught.value is original
     finally:
         api.close()

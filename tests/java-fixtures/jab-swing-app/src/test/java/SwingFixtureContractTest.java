@@ -184,6 +184,13 @@ final class SwingFixtureContractTest {
                             .getAccessibleContext()
                             .getAccessibleName());
             assertEquals("Processing", table.getValueAt(7, 3));
+            assertTrue(table.isCellEditable(7, 3));
+            assertFalse(table.isCellEditable(7, 2));
+            assertEquals(
+                    "cell=Processing",
+                    find(tab, "fixture.table_edit_status", JLabel.class)
+                            .getAccessibleContext()
+                            .getAccessibleDescription());
 
             find(tab, "fixture.mark_done_button", JButton.class).doClick();
             assertEquals("Done", table.getValueAt(7, 3));

@@ -31,6 +31,10 @@ FALSE = 0
 TARGET_HWND = 0x4242
 PID = 4242
 SUCCESS_AFTER_TWO_ATTEMPTS = 2
+REPEATED_KEYS = 3
+SINGLE_KEY_EVENTS = 2
+REPEATED_KEY_EVENTS = 6
+UNICODE_EVENTS = 6
 
 
 class StubUser32:
@@ -39,6 +43,7 @@ class StubUser32:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.foreground_hwnd = 0
+        self.send_counts: list[int] = []
         # Number of `SetForegroundWindow` calls after which `GetForegroundWindow`
         # starts reporting the target hwnd; `None` means it never does.
         self.succeed_after_attempts: int | None = 1
@@ -82,6 +87,7 @@ class StubUser32:
             return 1
 
         def send_input(count: int, _inputs: Any, _size: int) -> int:
+            self.send_counts.append(count)
             return count
 
         self.EnumWindows = enum_windows
@@ -116,7 +122,7 @@ def test_set_foreground_window_succeeds_once_the_transition_is_observed(
     assert len(attempts) == SUCCESS_AFTER_TWO_ATTEMPTS
 
 
-def test_set_foreground_window_raises_after_three_failed_attempts(
+def test_set_foreground_window_raises_after_all_failed_attempts(
     stub_user32: StubUser32,
 ) -> None:
     stub_user32.succeed_after_attempts = None
@@ -129,8 +135,25 @@ def test_set_foreground_window_raises_after_three_failed_attempts(
         backend.set_foreground_window(TARGET_HWND)
 
     attempts = [call for call in stub_user32.calls if call[0] == "SetForegroundWindow"]
-    max_attempts = 3
+    max_attempts = sync_api._FOREGROUND_ATTEMPTS
     assert len(attempts) == max_attempts
+
+
+def test_keyboard_input_batches_keys_repetition_and_utf16_units(
+    stub_user32: StubUser32,
+) -> None:
+    backend = sync_api._Win32WindowBackend()
+
+    backend.send_key(sync_api._VK_F2)
+    backend.send_repeated_key(sync_api._VK_DELETE, REPEATED_KEYS)
+    backend.send_text("A😀")
+    backend.send_text("")
+
+    assert stub_user32.send_counts == [
+        SINGLE_KEY_EVENTS,
+        REPEATED_KEY_EVENTS,
+        UNICODE_EVENTS,
+    ]
 
 
 class StubKernel32:

@@ -9,16 +9,19 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from enum import IntFlag
+from functools import lru_cache
 from pathlib import Path
 from re import Pattern
 from types import TracebackType
 from typing import Literal, Protocol, TypeAlias, TypeVar, cast
 
 from play_jab._native.backend import ContextInfo, TableCellInfo, dll_backend_factory
-from play_jab._native.bridge import BridgeRuntime
+from play_jab._native.bridge import BridgeRuntime, TextReader, Verdict
 from play_jab._native.manager import RuntimeManager, RuntimeSession
 from play_jab._native.refs import JavaRef
 from play_jab.exceptions import (
@@ -65,14 +68,26 @@ _DIAGNOSTIC_NODES = 50
 # `_strict()` only ever distinguishes 0 / 1 / "more than one" match; a scan
 # never needs to walk past the second match just to confirm ambiguity.
 _STRICT_MATCH_LIMIT = 2
+_PATH_CACHE_MAX_ENTRIES = 1_024
 _PASSWORD_ROLE = "password text"
+_COLLAPSED = "collapsed"
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
+_FOREGROUND_ATTEMPTS = 10
+_FOREGROUND_RETRY_INTERVAL = 0.05
 _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 _INPUT_MOUSE = 0
+_INPUT_KEYBOARD = 1
 _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
 _MOUSEEVENTF_WHEEL = 0x0800
+_KEYEVENTF_KEYUP = 0x0002
+_KEYEVENTF_UNICODE = 0x0004
+_VK_DELETE = 0x2E
+_VK_ESCAPE = 0x1B
+_VK_F2 = 0x71
+_VK_HOME = 0x24
+_VK_RETURN = 0x0D
 _WHEEL_DELTA = 120
 _SYNTHETIC_INPUT_LOCK = threading.RLock()
 
@@ -224,6 +239,12 @@ class WindowBackend(Protocol):
 
     def send_mouse_wheel(self, delta: int) -> None: ...
 
+    def send_key(self, vk_code: int) -> None: ...
+
+    def send_repeated_key(self, vk_code: int, count: int) -> None: ...
+
+    def send_text(self, value: str) -> None: ...
+
 
 class _RuntimeFacade(Protocol):
     @property
@@ -283,6 +304,17 @@ class _RuntimeFacade(Protocol):
 
     def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...] | None: ...
 
+    def traverse(
+        self,
+        hwnd: int,
+        start_path: Sequence[int],
+        visit: Callable[[tuple[int, ...], int, ContextInfo, TextReader], Verdict],
+    ) -> None: ...
+
+    def read_path(
+        self, hwnd: int, path: Sequence[int], *, read_text: bool = False
+    ) -> tuple[tuple[ContextInfo, ...], str | None]: ...
+
 
 class _Win32WindowBackend:
     """Small Win32 seam kept separate from portable locator logic."""
@@ -335,14 +367,24 @@ class _Win32WindowBackend:
                 ("dwExtraInfo", ulong_ptr),
             )
 
+        class KeyboardInput(ctypes.Structure):
+            _fields_ = (
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ulong_ptr),
+            )
+
         class InputUnion(ctypes.Union):
-            _fields_ = (("mi", MouseInput),)
+            _fields_ = (("mi", MouseInput), ("ki", KeyboardInput))
 
         class Input(ctypes.Structure):
             _anonymous_ = ("value",)
             _fields_ = (("type", wintypes.DWORD), ("value", InputUnion))
 
         self._mouse_input = MouseInput
+        self._keyboard_input = KeyboardInput
         self._input = Input
         self._user32.SendInput.argtypes = [
             wintypes.UINT,
@@ -384,12 +426,12 @@ class _Win32WindowBackend:
         # is still completing a permitted foreground transition. Verify the
         # observable state and retry briefly instead of turning that ambiguous
         # return into the misleading "operation completed successfully" error.
-        for _ in range(3):
+        for _ in range(_FOREGROUND_ATTEMPTS):
             self._user32.BringWindowToTop(hwnd)
             self._user32.SetForegroundWindow(hwnd)
             if int(self._user32.GetForegroundWindow() or 0) == hwnd:
                 return
-            time.sleep(0.01)
+            time.sleep(_FOREGROUND_RETRY_INTERVAL)
         error = ctypes.get_last_error()
         if error:
             raise ctypes.WinError(error)
@@ -432,6 +474,52 @@ class _Win32WindowBackend:
             1, ctypes.byref(event), ctypes.sizeof(self._input)
         )
         if sent != 1:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def send_key(self, vk_code: int) -> None:
+        self._send_keyboard_events(((vk_code, 0, 0), (vk_code, 0, _KEYEVENTF_KEYUP)))
+
+    def send_repeated_key(self, vk_code: int, count: int) -> None:
+        if not count:
+            return
+        self._send_keyboard_events(
+            tuple(
+                event
+                for _ in range(count)
+                for event in (
+                    (vk_code, 0, 0),
+                    (vk_code, 0, _KEYEVENTF_KEYUP),
+                )
+            )
+        )
+
+    def send_text(self, value: str) -> None:
+        encoded = value.encode("utf-16-le", errors="surrogatepass")
+        events = tuple(
+            event
+            for code_unit in (
+                int.from_bytes(encoded[index : index + 2], "little")
+                for index in range(0, len(encoded), 2)
+            )
+            for event in (
+                (0, code_unit, _KEYEVENTF_UNICODE),
+                (0, code_unit, _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
+            )
+        )
+        if events:
+            self._send_keyboard_events(events)
+
+    def _send_keyboard_events(self, events: Sequence[tuple[int, int, int]]) -> None:
+        inputs = (self._input * len(events))()
+        for index, (vk_code, scan_code, flags) in enumerate(events):
+            inputs[index].type = _INPUT_KEYBOARD
+            inputs[index].ki = self._keyboard_input(
+                wVk=vk_code,
+                wScan=scan_code,
+                dwFlags=flags,
+            )
+        sent = self._user32.SendInput(len(events), inputs, ctypes.sizeof(self._input))
+        if sent != len(events):
             raise ctypes.WinError(ctypes.get_last_error())
 
 
@@ -506,16 +594,24 @@ _RUNTIME_MANAGER = RuntimeManager()
 class PlayJab:
     """Own one bridge runtime and create Java application handles."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         timeout: int = 5_000,
         dll_path: str | Path | None = None,
         extra_roles: Iterable[str] = (),
         extra_states: Iterable[str] = (),
+        path_cache: bool = True,
     ) -> None:
         self._timeout = _timeout(timeout)
+        if not isinstance(path_cache, bool):
+            raise ValueError("path_cache must be a bool")
         self._registry = AccessibilityRegistry(extra_roles, extra_states)
         self._dll_path = dll_path
+        self._path_cache_enabled = path_cache
+        self._path_cache: OrderedDict[_CacheKey, tuple[tuple[int, ...], ...]] = (
+            OrderedDict()
+        )
+        self._path_cache_lock = threading.RLock()
         self._runtime: RuntimeSession | None = None
         self._lifecycle_lock = threading.RLock()
         self._windows = _create_window_backend()
@@ -553,11 +649,42 @@ class PlayJab:
                 )
                 self._started = True
 
+    def clear_path_cache(self) -> None:
+        """Forget every remembered locator path.
+
+        Only needed when something outside play-jab rebuilt the window's Swing
+        tree in a way that leaves the old paths matching the wrong nodes;
+        ordinary staleness is detected and healed on the next resolution.
+        """
+        with self._path_cache_lock:
+            self._path_cache.clear()
+
+    def _cached_path(self, key: _CacheKey) -> tuple[tuple[int, ...], ...] | None:
+        with self._path_cache_lock:
+            boundaries = self._path_cache.get(key)
+            if boundaries is not None:
+                self._path_cache.move_to_end(key)
+            return boundaries
+
+    def _remember_path(
+        self, key: _CacheKey, boundaries: tuple[tuple[int, ...], ...]
+    ) -> None:
+        with self._path_cache_lock:
+            self._path_cache[key] = boundaries
+            self._path_cache.move_to_end(key)
+            while len(self._path_cache) > _PATH_CACHE_MAX_ENTRIES:
+                self._path_cache.popitem(last=False)
+
+    def _forget_cached_path(self, key: _CacheKey) -> None:
+        with self._path_cache_lock:
+            self._path_cache.pop(key, None)
+
     def close(self) -> None:
         with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
+            self.clear_path_cache()
             runtime = self._runtime
         if runtime is not None:
             runtime.close()
@@ -1108,6 +1235,18 @@ def _make_query(  # noqa: PLR0913, PLR0917
     )
 
 
+def _depth_allowed(step: _Step, depth: int, *, first: bool) -> bool:
+    """Whether a match that deep below its step's start is still reachable.
+
+    Mirrors the traversal: the first step may match its own start node, every
+    later one only searches strictly below its parent, and ``max_depth`` caps
+    how far down a match may be found.
+    """
+    if depth < (0 if first else 1):
+        return False
+    return step.query.max_depth is None or depth <= step.query.max_depth
+
+
 @dataclass(frozen=True, slots=True)
 class _Match:
     path: tuple[int, ...]
@@ -1119,6 +1258,10 @@ class _Match:
 class _Step:
     query: _Query
     position: int | None = None
+
+
+_CacheKey: TypeAlias = "tuple[int, tuple[_Step, ...]]"
+"""A window handle plus the locator chain that was resolved against it."""
 
 
 class _StaleContext(Exception):
@@ -1201,7 +1344,7 @@ class Locator:
 
     def exists(self) -> bool:
         """Return immediately after finding the first matching element."""
-        return bool(self._resolve_immediate(match_limit=1))
+        return bool(self._resolve_single(1))
 
     def all(self) -> list[Locator]:
         return [self.nth(index) for index in range(self.count())]
@@ -1338,6 +1481,7 @@ class Locator:
                         if owned is not None:
                             owned.close()
             except (_StaleContext, _StaleLocatorError):
+                self._forget_path()
                 if attempted and time.monotonic() >= deadline:
                     self._raise_timeout("attached", wait, started=started)
                 attempted = True
@@ -1750,14 +1894,14 @@ class Locator:
         self._operate(wheel, timeout=timeout, actionable=True)
 
     def is_visible(self) -> bool:
-        matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
+        matches = self._resolve_single(_STRICT_MATCH_LIMIT)
         if not matches:
             return False
         match = self._strict(matches)
         return "visible" in match.snapshot.states
 
     def is_enabled(self) -> bool:
-        matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
+        matches = self._resolve_single(_STRICT_MATCH_LIMIT)
         if not matches:
             return False
         match = self._strict(matches)
@@ -1770,7 +1914,7 @@ class Locator:
         deadline = time.monotonic() + wait / 1_000
         while True:
             try:
-                matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
+                matches = self._resolve_single(_STRICT_MATCH_LIMIT)
             except _StaleLocatorError:
                 matches = []
             if self._condition(state, matches):
@@ -1799,7 +1943,7 @@ class Locator:
         started = deadline - timeout / 1_000
         while True:
             try:
-                matches = self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
+                matches = self._resolve_single(_STRICT_MATCH_LIMIT)
             except _StaleLocatorError:
                 matches = []
             if matches:
@@ -1852,9 +1996,83 @@ class Locator:
         except Exception:  # diagnostics must not replace the original failure
             return "<accessibility tree unavailable>"
 
+    def _resolve_single(self, match_limit: int) -> list[_Match]:
+        """Resolve the chain when at most one match will be acted on.
+
+        Tries the remembered path first: re-reading the nodes along it costs
+        one native call per path element, against one per node in the tree for
+        a full scan. A remembered path that no longer satisfies every step of
+        the chain is simply dropped and the scan runs as before, so a rebuilt
+        Swing tree heals itself on the next call.
+        """
+        api = self._window._api
+        key: _CacheKey | None = None
+        if api._path_cache_enabled:
+            key = (self._window.hwnd, self._chain)
+            boundaries = api._cached_path(key)
+            if boundaries is not None:
+                cached = self._match_cached(boundaries)
+                if cached is not None:
+                    return [cached]
+                api._forget_cached_path(key)
+        matches, prefixes = self._resolve_traced(match_limit)
+        cacheable_scan = (
+            self._chain[-1].position is not None or match_limit >= _STRICT_MATCH_LIMIT
+        )
+        if key is not None and cacheable_scan and len(matches) == 1:
+            api._remember_path(key, (*prefixes, matches[0].path))
+        return matches
+
+    def _forget_path(self) -> None:
+        """Drop this chain's remembered path after it failed to hold up."""
+        api = self._window._api
+        if api._path_cache_enabled:
+            api._forget_cached_path((self._window.hwnd, self._chain))
+
+    def _match_cached(self, boundaries: tuple[tuple[int, ...], ...]) -> _Match | None:
+        """Re-check a remembered path; ``None`` means it no longer holds.
+
+        Every step of the chain has to still be satisfied by the node that was
+        chosen for it, at the same depth budget - not just the final target, or
+        a chain whose parent moved elsewhere would keep resolving.
+        """
+        registry = self._window._api._registry
+        target = boundaries[-1]
+        try:
+            infos, _text = self._window._api._bridge.read_path(
+                self._window.hwnd, target
+            )
+        except (NativeCallError, _StaleContext):
+            return None
+        snapshot: ElementSnapshot | None = None
+        previous = 0
+        for index, (step, boundary) in enumerate(zip(self._chain, boundaries)):
+            info = infos[len(boundary)]
+            snapshot = _snapshot(info, registry, redact_password=False)
+            if not step.query.matches(snapshot):
+                return None
+            depth = len(boundary) - previous
+            if not _depth_allowed(step, depth, first=index == 0):
+                return None
+            previous = len(boundary)
+        if snapshot is None:  # pragma: no cover - a chain always has a step
+            return None
+        return _Match(target, _redacted(snapshot, infos[len(target)]))
+
     def _resolve_immediate(
         self, match_limit: int | None = None, *, read_text: bool = False
     ) -> list[_Match]:
+        return self._resolve_traced(match_limit, read_text=read_text)[0]
+
+    def _resolve_traced(
+        self, match_limit: int | None = None, *, read_text: bool = False
+    ) -> tuple[list[_Match], tuple[tuple[int, ...], ...]]:
+        """Resolve the chain, also reporting the node chosen for each step.
+
+        The extra return value is what the path cache remembers: one absolute
+        path per chain step, so a later resolution can re-check the very same
+        nodes instead of walking the tree again.
+        """
         for attempt in range(2):
             try:
                 return self._resolve_once(match_limit, read_text=read_text)
@@ -1867,8 +2085,9 @@ class Locator:
 
     def _resolve_once(
         self, match_limit: int | None = None, *, read_text: bool = False
-    ) -> list[_Match]:
+    ) -> tuple[list[_Match], tuple[tuple[int, ...], ...]]:
         parents: list[_Match] | None = None
+        prefixes: list[tuple[int, ...]] = []
         last_step = len(self._chain) - 1
         for step_index, step in enumerate(self._chain):
             scan_limit = None
@@ -1897,6 +2116,7 @@ class Locator:
                 )
             else:
                 parent = self._strict(parents)
+                prefixes.append(parent.path)
                 matches = self._scan(
                     parent.path,
                     step.query,
@@ -1907,7 +2127,7 @@ class Locator:
             parents = self._select_position(matches, step.position)
             if step_index < last_step:
                 self._strict(parents)
-        return parents or []
+        return parents or [], tuple(prefixes)
 
     def _select_position(
         self,
@@ -1930,126 +2150,46 @@ class Locator:
         match_limit: int | None = None,
         read_text: bool = False,
     ) -> list[_Match]:
-        runtime = self._window._api._bridge
-        with runtime.context_from_hwnd(self._window.hwnd) as root:
-            start = root
-            owned: JavaRef | None = None
-            try:
-                for index in start_path:
-                    child = runtime.child(start, index)
-                    if child is None:
-                        raise _StaleContext
-                    if owned is not None:
-                        owned.close()
-                    owned = child
-                    start = child
-                matches: list[_Match] = []
-                seen = [0]
-                self._walk(
-                    start,
-                    start_path,
-                    0,
-                    query,
-                    include_start,
-                    matches,
-                    seen,
-                    match_limit,
-                    read_text=read_text,
-                )
-                return matches
-            finally:
-                if owned is not None:
-                    owned.close()
+        """Collect matches under ``start_path`` in a single batched traversal.
 
-    def _walk(  # noqa: PLR0913, PLR0917
-        self,
-        ref: JavaRef,
-        path: tuple[int, ...],
-        depth: int,
-        query: _Query,
-        consider: bool,
-        matches: list[_Match],
-        seen: list[int],
-        match_limit: int | None,
-        info: ContextInfo | None = None,
-        *,
-        read_text: bool = False,
-    ) -> bool:
-        if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
-            raise LocatorError("accessibility traversal limit exceeded")
-        if info is None:
-            info = _context_info(self._window._api._bridge, ref)
-        seen[0] += 1
-        raw_snapshot = _snapshot(
-            info,
-            self._window._api._registry,
-            redact_password=False,
-        )
-        if query.showing_only and "showing" not in raw_snapshot.states:
-            return False
-        if consider and query.matches(raw_snapshot):
-            # `ref` is still open here — the caller frame closes it only
-            # after this call returns — so a live AccessibleText read costs
-            # nothing extra: no second chain resolution is needed later.
-            text = (
-                _bulk_text_content(self._window._api._bridge, ref, raw_snapshot)
-                if read_text
-                else None
-            )
-            matches.append(
-                _Match(path, _snapshot(info, self._window._api._registry), text)
-            )
-            if match_limit is not None and len(matches) >= match_limit:
-                return True
-        if query.max_depth is not None and depth >= query.max_depth:
-            return False
-        visible = (
-            self._window._api._bridge.visible_children(ref)
-            if "manages descendants" in raw_snapshot.states
-            else None
-        )
-        if visible is not None:
-            try:
-                for child in visible:
-                    child_info = _context_info(self._window._api._bridge, child)
-                    index = child_info.index_in_parent
-                    if index < 0:
-                        raise _StaleContext
-                    if self._walk(
-                        child,
-                        (*path, index),
-                        depth + 1,
-                        query,
-                        True,
-                        matches,
-                        seen,
-                        match_limit,
-                        info=child_info,
-                        read_text=read_text,
-                    ):
-                        return True
-            finally:
-                for child in reversed(visible):
-                    child.close()
-            return False
-        for index in range(info.children_count):
-            ordinary_child = self._window._api._bridge.child(ref, index)
-            if ordinary_child is None:
-                raise _StaleContext
-            with ordinary_child:
-                if self._walk(
-                    ordinary_child,
-                    (*path, index),
-                    depth + 1,
-                    query,
-                    True,
-                    matches,
-                    seen,
-                    match_limit,
-                    read_text=read_text,
-                ):
-                    return True
-        return False
+        The whole depth-first walk runs inside one worker-thread step (see
+        :meth:`BridgeRuntime.traverse`); this method only decides, per node,
+        whether it matches and whether the walk should go deeper.
+        """
+        registry = self._window._api._registry
+        matches: list[_Match] = []
+        seen = 0
+
+        def visit(
+            path: tuple[int, ...],
+            depth: int,
+            info: ContextInfo,
+            read: TextReader,
+        ) -> Verdict:
+            nonlocal seen
+            if depth > _MAX_TREE_DEPTH or seen >= _MAX_TREE_NODES:
+                raise LocatorError("accessibility traversal limit exceeded")
+            seen += 1
+            snapshot = _snapshot(info, registry, redact_password=False)
+            if query.showing_only and "showing" not in snapshot.states:
+                return Verdict.SKIP_CHILDREN
+            if (include_start or depth > 0) and query.matches(snapshot):
+                text = _reader_text_content(read, snapshot) if read_text else None
+                matches.append(_Match(path, _redacted(snapshot, info), text))
+                if match_limit is not None and len(matches) >= match_limit:
+                    return Verdict.STOP
+            if query.max_depth is not None and depth >= query.max_depth:
+                return Verdict.SKIP_CHILDREN
+            if query.showing_only and _COLLAPSED in snapshot.states:
+                # A collapsed node renders none of its subtree, so no
+                # descendant can be showing. Reading them all only to reject
+                # them one by one is what makes a large tree control dominate
+                # the cost of an unrelated search.
+                return Verdict.SKIP_CHILDREN
+            return Verdict.DESCEND
+
+        self._window._api._bridge.traverse(self._window.hwnd, start_path, visit)
+        return matches
 
     def accessibility_tree(
         self,
@@ -2058,9 +2198,7 @@ class Locator:
     ) -> AccessibilityNode:
         _tree_limits(max_depth, max_nodes)
         for attempt in range(2):
-            match = self._strict(
-                self._resolve_immediate(match_limit=_STRICT_MATCH_LIMIT)
-            )
+            match = self._strict(self._resolve_single(_STRICT_MATCH_LIMIT))
             try:
                 return self._tree_for_match(match, max_depth, max_nodes)
             except (_StaleContext, NativeCallError):
@@ -2395,27 +2533,119 @@ class TableCellLocator:
                 )
             window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
+    def fill(self, value: str, timeout: int | None = None) -> None:
+        """Edit a standard Swing table cell in place and commit with Enter.
 
-def _bulk_text_content(
-    runtime: BridgeRuntime | _RuntimeFacade,
-    ref: JavaRef,
-    snapshot: ElementSnapshot,
-) -> str:
+        A table cell's ``AccessibleContext`` obtained through
+        ``getAccessibleTableCellInfo`` normally belongs to the cell
+        *renderer*, which has no ``AccessibleText`` -- writing to it would
+        never reach the table model (this is exactly why ``text_content()``
+        falls back to ``description``/``name`` when ``accessible_text`` is
+        false). Selecting the cell, focusing its table and pressing F2 asks
+        Swing to install the live editor without guessing screen geometry.
+        ``AccessibleJTable`` keeps exposing renderer cells even while that
+        editor is active, so replacement text is delivered as Unicode Win32
+        input (Home, Delete, text, Enter) and the committed model is verified
+        via JAB.
+
+        This contract covers the standard text editor of a visible ``JTable``.
+        A custom editor that does not accept this keyboard sequence is reported
+        as unsupported.
+        """
+        if not isinstance(value, str):
+            raise TypeError("fill() value must be a string")
+
+        locator = self._table._locator
+        wait, started, deadline = locator._deadline(timeout)
+        window = locator._window
+        windows = window._api._windows
+
+        original = self.text_content(timeout=locator._remaining_ms(deadline))
+
+        with _SYNTHETIC_INPUT_LOCK:
+            activation_sent = False
+            committed = False
+            try:
+                self._operate(
+                    lambda runtime, context, _cell, info: runtime.set_child_selected(
+                        context, info.index, True
+                    ),
+                    timeout=locator._remaining_ms(deadline),
+                    actionable=True,
+                )
+                locator.focus(timeout=locator._remaining_ms(deadline))
+                windows.set_foreground_window(window.hwnd)
+                windows.send_key(_VK_F2)
+                activation_sent = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise UnsupportedActionError(
+                        f"cell ({self.row}, {self.column}) did not enter edit mode"
+                    )
+                window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
+                windows.send_key(_VK_HOME)
+                original_code_units = (
+                    len(original.encode("utf-16-le", errors="surrogatepass")) // 2
+                )
+                windows.send_repeated_key(_VK_DELETE, original_code_units)
+                windows.send_text(value)
+                windows.send_key(_VK_RETURN)
+                while True:
+                    observed = self.text_content(timeout=0)
+                    if observed == value:
+                        committed = True
+                        return
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if observed == original:
+                            raise UnsupportedActionError(
+                                f"cell ({self.row}, {self.column}) did not "
+                                "accept in-place editing"
+                            )
+                        locator._raise_timeout(
+                            "cell text updated",
+                            wait,
+                            started=started,
+                            last_state=observed,
+                        )
+                    window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
+            except Exception:
+                if activation_sent and not committed:
+                    with suppress(OSError):
+                        windows.send_key(_VK_ESCAPE)
+                raise
+
+
+def _reader_text_content(read: TextReader, snapshot: ElementSnapshot) -> str:
     """Same fallback as ``Locator.text_content()``, redacting password values.
 
-    Used only by ``all_text_contents()``'s bulk traversal, where every match
-    is read regardless of which field a caller actually wanted — unlike
+    Used by the traversals that read text for every match they collect, where
+    a value is read regardless of which field a caller actually wanted - unlike
     ``text_content()``'s explicit single-field read, this must not leak a
     password value incidentally swept up in the batch.
     """
-    text = None
-    if snapshot.accessible_text:
-        text = runtime.accessible_text(ref)
+    text = read() if snapshot.accessible_text else None
     if text is None:
         text = snapshot.description or snapshot.name
     if snapshot.role == _PASSWORD_ROLE and text:
         return "<redacted>"
     return text
+
+
+def _redacted(snapshot: ElementSnapshot, info: ContextInfo) -> ElementSnapshot:
+    """The public form of a snapshot taken with redaction switched off.
+
+    Traversals match against unredacted values, so recomputing the whole
+    snapshot for every node just to hide password text would double the work
+    on the hot path for the one role that needs it.
+    """
+    if info.role_en_us != _PASSWORD_ROLE:
+        return snapshot
+    return replace(
+        snapshot,
+        name="<redacted>" if snapshot.name else snapshot.name,
+        description=("<redacted>" if snapshot.description else snapshot.description),
+    )
 
 
 def _context_info(runtime: BridgeRuntime | _RuntimeFacade, ref: JavaRef) -> ContextInfo:
@@ -2427,7 +2657,14 @@ def _context_info(runtime: BridgeRuntime | _RuntimeFacade, ref: JavaRef) -> Cont
         raise
 
 
+@lru_cache(maxsize=256)
 def _states(value: str) -> frozenset[str]:
+    """Parse a raw ``states_en_US`` string.
+
+    Memoized because a tree walk sees the same handful of distinct state
+    strings across tens of thousands of nodes, and the parse plus the registry
+    validation below it are pure functions of that string.
+    """
     return frozenset(part.strip() for part in value.split(",") if part.strip())
 
 

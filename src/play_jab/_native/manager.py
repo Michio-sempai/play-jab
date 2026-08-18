@@ -6,12 +6,12 @@ from __future__ import annotations
 import os
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TypeVar, cast
 
 from play_jab._native.backend import ContextInfo, TableCellInfo
-from play_jab._native.bridge import BridgeRuntime
+from play_jab._native.bridge import BridgeRuntime, Visitor
 from play_jab._native.refs import JavaRef
 from play_jab.exceptions import BridgeClosedError, BridgeInitializationError
 
@@ -149,6 +149,16 @@ class RuntimeSession:
 
     def visible_children(self, ref: JavaRef) -> tuple[JavaRef, ...] | None:
         return self._invoke(lambda: self._runtime.visible_children(ref))
+
+    def traverse(self, hwnd: int, start_path: Sequence[int], visit: Visitor) -> None:
+        self._invoke(lambda: self._runtime.traverse(hwnd, start_path, visit))
+
+    def read_path(
+        self, hwnd: int, path: Sequence[int], *, read_text: bool = False
+    ) -> tuple[tuple[ContextInfo, ...], str | None]:
+        return self._invoke(
+            lambda: self._runtime.read_path(hwnd, path, read_text=read_text)
+        )
 
     def close(self) -> None:
         if self._closed:

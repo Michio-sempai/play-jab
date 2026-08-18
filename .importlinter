@@ -1,0 +1,12 @@
+[importlinter]
+root_package = play_jab
+
+[importlinter:contract:package-layers]
+name = Package layers flow from the public API towards native infrastructure
+type = layers
+layers =
+    play_jab._skill
+    play_jab.sync_api
+    play_jab.registry
+    play_jab._native
+    play_jab.exceptions

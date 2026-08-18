@@ -80,13 +80,23 @@ with PlayJab(timeout=5_000, dll_path=r"C:\JAB\WindowsAccessBridge-64.dll") as ja
 
     table = window.get_by_name("jobs.table").as_table()
     print(table.row_count(), table.column_count())
+    table.cell(7, 3).fill("Done")
     table.cell(7, 3).wait_for_text("Done")
 ```
 
 `attach(hwnd=...)`, `attach(pid=...)`, and `attach(title=...)` connect to an
 existing process. Window titles and ordinary string locators use exact,
-case-sensitive matching. Locators are lazy and acquire fresh JAB contexts for
-every operation; snapshots and accessibility trees contain copied metadata and
+case-sensitive matching. Locators are lazy and take a fresh
+JAB context for every operation. Every operation that acts on a single node
+also remembers the child-index path it resolved to, and re-checks that path
+first on the next call instead of walking the tree again; a path that no
+longer satisfies every step of the chain is discarded and the scan runs as
+before. Pass `PlayJab(path_cache=False)` to resolve exhaustively every time,
+or call `clear_path_cache()` to forget what has been remembered. With the
+cache on, `StrictModeViolation` is reported by the scans, not by the
+re-checks: a new duplicate added after a warm lookup is not discovered until
+the path is invalidated or cleared. The thread-safe LRU keeps at most 1,024
+chains. Snapshots and accessibility trees contain copied metadata and
 do not own Java references. Closing any or all `PlayJab` sessions leaves every
 attached process alive. There is intentionally no `PlayJab.launch()`.
 `PlayJab.list_windows()` enumerates every currently visible top-level Java
@@ -97,7 +107,9 @@ opened.
 immediate, non-strict first-match check; use `wait_for()` when polling is
 required. Positional `first()` and `nth()` locators stop traversal once their
 requested match is found. Set `showing_only=True` to match showing nodes and
-prune non-showing subtrees; `visible_only=True` keeps its non-pruning behavior.
+prune non-showing subtrees, including the subtree of any `collapsed` node,
+whose descendants a toolkit never renders; `visible_only=True` keeps its
+non-pruning behavior.
 Pass `max_depth=` to cap how far a locator descends relative to its own
 starting point, so a shallow target behind a deep, showing sibling does not
 force a full traversal of that sibling first.
@@ -111,7 +123,12 @@ Form locators support `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
 `select_option()`, `text_content()`, and state/attribute reads. Password text may
 be read explicitly, but is redacted from dumps, snapshots, logs, and errors.
 Table indices are zero-based; `as_table()` exposes dimensions, snapshots,
-headers, row selection, cells, and cell text waits.
+headers, row selection, cells, cell text waits, and in-place editing through
+`cell(...).fill(value)`. Cell fill targets the standard visible Swing
+`JTable` text editor: it selects and focuses the cell, opens the editor with
+F2, replaces its text through Unicode Win32 input, commits with Enter, and
+verifies the table model through JAB. Read-only or custom editors that do not
+accept this sequence raise `UnsupportedActionError`.
 
 Reads (`snapshot`, `text_content`, attributes, table cells) also work for hidden
 or disabled nodes. Actions require the target and every ancestor to be visible,
@@ -170,6 +187,8 @@ play-jab-skill --force    # overwrite an existing installation
 - [Getting Started](docs/getting-started.md)
 - [Design](docs/design.md) ([Russian](docs/design.ru.md)) — module/interface/seam
   vocabulary applied to the actual stack, for contributors
+- [Performance](docs/performance.md) ([Russian](docs/performance.ru.md)) — how to
+  profile element lookup and how to read the numbers
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 

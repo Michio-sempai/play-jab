@@ -1,3 +1,20 @@
+## v2026.08.8 (2026-08-18)
+
+### Feat
+
+- add `TableCellLocator.fill()` for standard Swing in-place text editing
+- add a bounded, thread-safe locator path cache with an exhaustive opt-out
+
+### Perf
+
+- batch locator tree traversal into one bridge worker step
+- prune collapsed subtrees for showing-only locators
+
+### Fix
+
+- preserve strict-mode ambiguity checks after a preceding `exists()` call
+- replace every UTF-16 code unit when editing cells containing supplementary text
+
 ## v2026.08.7 (2026-08-10)
 
 ### Fix

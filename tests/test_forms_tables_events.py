@@ -369,8 +369,8 @@ def test_select_option_by_name_is_strict(
 
     with pytest.raises(StrictModeViolation, match="0 direct children"):
         options.select_option("Missing")
+    nodes["selection"].children[0].name = "Admin"
     with pytest.raises(StrictModeViolation, match="2 direct children"):
-        nodes["selection"].children[0].name = "Admin"
         options.select_option("Admin")
 
 
