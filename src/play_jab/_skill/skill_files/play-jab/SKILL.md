@@ -132,9 +132,9 @@ guessing:
 
 | Exception | Likely cause |
 | --- | --- |
-| `BridgeNotEnabledError` | JAB wasn't enabled (`jabswitch.exe -enable`) for the current user before the app started. |
+| `BridgeNotEnabledError` | Raised when discovery times out and no Java window on the desktop ever answered the bridge — JAB wasn't enabled (`jabswitch.exe -enable`) for the current user before the app started. |
 | `BridgeInitializationError` | Bad/missing `JAVA_HOME`, missing DLL, or a Python/JAB bitness mismatch. |
-| `JavaWindowNotFoundError` | The HWND is gone or doesn't belong to a Java window. |
+| `JavaWindowNotFoundError` | At least one Java window exists, so the bridge works; the HWND is gone or doesn't belong to a Java window matching the selector. |
 | `JavaWindowNotAccessibleError` | JAB was enabled *after* the target JVM had already started. |
 | `JavaProcessExitedError` | The attached OS process ended; attach a new session. |
 | `JavaVmExitedError` | The attached JVM announced shutdown; old locators/references are dead. |

@@ -25,6 +25,7 @@ SECRET = "hunter2-secret"
 DUPLICATE_COUNT = 2
 BUTTON_COUNT = 3
 FIRST_EXISTS_ACQUISITIONS = 3
+SCAN_THEN_ACTION_ROOT_COUNT = 2
 FIRST_SNAPSHOT_ACQUISITIONS = 3
 SECOND_SNAPSHOT_ACQUISITIONS = 6
 HEAVY_SIBLING_LEVELS = 50
@@ -505,6 +506,102 @@ def test_click_rejects_ambiguous_missing_and_non_actionable_targets(
         window.get_by_name("Duplicate").first().click()
 
 
+class _LateChildBackend(FakeBackend):
+    """Attach a node only on the Nth resolution pass, without any sleeping.
+
+    Mirrors ``_InitiallyStaleBackend``'s counted-pass style below: auto-wait
+    is proven by making the node's very existence depend on how many times
+    the tree has been scanned, not by racing a background thread against a
+    fixed sleep.
+    """
+
+    def __init__(self, root: FakeNode, child: FakeNode, *, appear_on_pass: int) -> None:
+        super().__init__({HWND: root})
+        self._root = root
+        self._child = child
+        self._appear_on_pass = appear_on_pass
+        self.passes = 0
+
+    def get_accessible_context_from_hwnd(self, hwnd: int) -> tuple[int, int] | None:
+        self.passes += 1
+        if self.passes == self._appear_on_pass:
+            self.add_child(self._root, self._child)
+        return super().get_accessible_context_from_hwnd(hwnd)
+
+
+CHECKBOX_APPEARS_ON_PASS = 2
+
+
+def _late_checkbox(*, initially_checked: bool) -> FakeNode:
+    states = "enabled,visible,showing"
+    if initially_checked:
+        states += ",checked"
+    return FakeNode(
+        name="Agree",
+        role_en_us="check box",
+        states_en_us=states,
+        accessible_action=True,
+        accessible_component=True,
+        actions=("click",),
+    )
+
+
+def test_check_waits_for_a_checkbox_that_appears_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = FakeNode(
+        name="Fixture", role_en_us="frame", states_en_us="enabled,visible,showing"
+    )
+    checkbox = _late_checkbox(initially_checked=False)
+    backend = _LateChildBackend(root, checkbox, appear_on_pass=CHECKBOX_APPEARS_ON_PASS)
+    api, window, runtime = _window_for_backend(monkeypatch, backend)
+    try:
+        window.get_by_name("Agree").check(timeout=2_000)
+        assert "checked" in window.get_by_name("Agree").snapshot().states
+        assert backend.passes >= CHECKBOX_APPEARS_ON_PASS
+        assert runtime.live_ref_count == 0
+        assert backend.acquired == backend.released
+    finally:
+        api.close()
+
+
+def test_uncheck_waits_for_a_checked_checkbox_that_appears_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = FakeNode(
+        name="Fixture", role_en_us="frame", states_en_us="enabled,visible,showing"
+    )
+    checkbox = _late_checkbox(initially_checked=True)
+    backend = _LateChildBackend(root, checkbox, appear_on_pass=CHECKBOX_APPEARS_ON_PASS)
+    api, window, runtime = _window_for_backend(monkeypatch, backend)
+    try:
+        window.get_by_name("Agree").uncheck(timeout=2_000)
+        assert "checked" not in window.get_by_name("Agree").snapshot().states
+        assert backend.passes >= CHECKBOX_APPEARS_ON_PASS
+        assert runtime.live_ref_count == 0
+        assert backend.acquired == backend.released
+    finally:
+        api.close()
+
+
+def test_check_on_a_permanently_missing_target_still_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fix must not turn check() into an unbounded wait: a target that
+    never appears still fails once the deadline is exhausted."""
+    root = FakeNode(
+        name="Fixture", role_en_us="frame", states_en_us="enabled,visible,showing"
+    )
+    backend = FakeBackend({HWND: root})
+    api, window, runtime = _window_for_backend(monkeypatch, backend)
+    try:
+        with pytest.raises(LocatorTimeoutError):
+            window.get_by_name("Never").check(timeout=100)
+        assert runtime.live_ref_count == 0
+    finally:
+        api.close()
+
+
 class _StaleFirstActionBackend(FakeBackend):
     def __init__(self, root: FakeNode) -> None:
         super().__init__({HWND: root})
@@ -528,6 +625,150 @@ def test_click_re_resolves_once_when_the_action_context_goes_stale(
         window.get_by_name("Duplicate").first().click()
         assert backend.staled_action_once
         assert [action for _, action in backend.performed_actions] == ["ClIcK"]
+        assert runtime.live_ref_count == 0
+        assert backend.acquired == backend.released
+    finally:
+        api.close()
+
+
+class _StaleSecondRootBackend(FakeBackend):
+    """Stale the root the action path opens, not the one the scan opened.
+
+    A resolution pass and the following ``Locator._operate`` each call
+    ``getAccessibleContextFromHWND`` once, in that order: the scan's own
+    retry already covers a stale first root, so only staling the *second*
+    root reaches ``_operate``'s own recovery branch.
+    """
+
+    def __init__(self, root: FakeNode) -> None:
+        super().__init__({HWND: root})
+        self.roots_handed_out = 0
+
+    def get_accessible_context_from_hwnd(self, hwnd: int) -> tuple[int, int] | None:
+        found = super().get_accessible_context_from_hwnd(hwnd)
+        self.roots_handed_out += 1
+        if found is not None and self.roots_handed_out == SCAN_THEN_ACTION_ROOT_COUNT:
+            self.make_stale(found[1])
+        return found
+
+
+def test_click_recovers_when_the_action_path_context_goes_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scan resolves the target, then the action path re-walks the same
+    path and finds the root context it just opened already stale - a Swing
+    tree rebuild landing between resolution and action, not during either
+    individually. This must heal like every other stale pass, not surface
+    the native call failure."""
+    backend = _StaleSecondRootBackend(_tree())
+    runtime = install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    api = PlayJab(timeout=2_000, path_cache=False)
+    api.__enter__()
+    try:
+        window = api.attach(pid=PID).window()
+        window.get_by_name("Duplicate").first().click()
+        assert [action for _, action in backend.performed_actions] == ["ClIcK"]
+        assert runtime.live_ref_count == 0
+        assert backend.acquired == backend.released
+    finally:
+        api.close()
+
+
+class _AlwaysStaleActionRootBackend(FakeBackend):
+    """Every scan succeeds; every action-path root the caller opens is stale.
+
+    Roots alternate: odd handouts (the scan's own ``traverse``) stay live,
+    even handouts (``_operate``'s own ``context_from_hwnd``) go stale
+    immediately - so ``_operate`` keeps finding its target and keeps failing
+    to act on it, and its own timeout branch (not the scan's) has to fire.
+    """
+
+    def __init__(self, root: FakeNode) -> None:
+        super().__init__({HWND: root})
+        self.roots_handed_out = 0
+
+    def get_accessible_context_from_hwnd(self, hwnd: int) -> tuple[int, int] | None:
+        found = super().get_accessible_context_from_hwnd(hwnd)
+        self.roots_handed_out += 1
+        if found is not None and self.roots_handed_out % 2 == 0:
+            self.make_stale(found[1])
+        return found
+
+
+class _ActionPathChildVanishesBackend(FakeBackend):
+    """The action path's first child lookup finds nothing, once.
+
+    Distinct from a dead context: the parent the action path re-opens is
+    perfectly live, but the index it walks toward no longer has a child at
+    all - a sibling was removed, not the target's own context invalidated.
+    ``getAccessibleChildFromContext`` returns ``0`` for this, not FALSE, so
+    this must raise ``_StaleLocatorError`` rather than route through
+    ``_context_info``.
+    """
+
+    def __init__(self, root: FakeNode) -> None:
+        super().__init__({HWND: root})
+        self.roots_handed_out = 0
+        self._triggered = False
+
+    def get_accessible_context_from_hwnd(self, hwnd: int) -> tuple[int, int] | None:
+        found = super().get_accessible_context_from_hwnd(hwnd)
+        self.roots_handed_out += 1
+        return found
+
+    def get_accessible_child_from_context(
+        self, vm_id: int, context: int, index: int
+    ) -> int:
+        if self.roots_handed_out >= SCAN_THEN_ACTION_ROOT_COUNT and not self._triggered:
+            self._triggered = True
+            return 0
+        return super().get_accessible_child_from_context(vm_id, context, index)
+
+
+def test_click_recovers_when_a_child_vanishes_mid_walk_on_the_action_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _ActionPathChildVanishesBackend(_tree())
+    runtime = install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    api = PlayJab(timeout=2_000, path_cache=False)
+    api.__enter__()
+    try:
+        window = api.attach(pid=PID).window()
+        window.get_by_name("Duplicate").first().click()
+        assert backend._triggered
+        assert [action for _, action in backend.performed_actions] == ["ClIcK"]
+        assert runtime.live_ref_count == 0
+        assert backend.acquired == backend.released
+    finally:
+        api.close()
+
+
+def test_click_times_out_cleanly_when_the_action_path_never_stops_staling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _AlwaysStaleActionRootBackend(_tree())
+    runtime = install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    api = PlayJab(timeout=100, path_cache=False)
+    api.__enter__()
+    try:
+        window = api.attach(pid=PID).window()
+        with pytest.raises(LocatorTimeoutError):
+            window.get_by_name("Duplicate").first().click()
         assert runtime.live_ref_count == 0
         assert backend.acquired == backend.released
     finally:

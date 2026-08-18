@@ -17,6 +17,7 @@ from play_jab.exceptions import BridgeInitializationError
 __all__ = [
     "DLL_NAME_32",
     "DLL_NAME_64",
+    "JAB_NOT_ENABLED_MESSAGE",
     "find_access_bridge_dll",
     "jab_enabled_for_current_user",
     "load_access_bridge",
@@ -34,6 +35,13 @@ _MAX_32_BIT_INTEGER = (1 << _BITNESS_32) - 1
 _ACCESSIBILITY_PROPERTIES = ".accessibility.properties"
 _ASSISTIVE_TECHNOLOGIES_KEY = "assistive_technologies"
 _ACCESS_BRIDGE_TECHNOLOGY = "AccessBridge"
+
+JAB_NOT_ENABLED_MESSAGE = (
+    "Java Access Bridge is not enabled for the current user. Enable it with "
+    r"`%JAVA_HOME%\bin\jabswitch -enable` and restart the Java application."
+)
+"""Shared between :mod:`bridge` (readiness probe) and :mod:`sync_api`
+(desktop-wide discovery), so the two diagnostic paths cannot drift apart."""
 
 
 def process_bitness() -> int:

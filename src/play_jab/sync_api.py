@@ -22,10 +22,12 @@ from typing import Literal, Protocol, TypeAlias, TypeVar, cast
 
 from play_jab._native.backend import ContextInfo, TableCellInfo, dll_backend_factory
 from play_jab._native.bridge import BridgeRuntime, TextReader, Verdict
+from play_jab._native.dll import JAB_NOT_ENABLED_MESSAGE, jab_enabled_for_current_user
 from play_jab._native.manager import RuntimeManager, RuntimeSession
 from play_jab._native.refs import JavaRef
 from play_jab.exceptions import (
     BridgeClosedError,
+    BridgeNotEnabledError,
     JavaProcessExitedError,
     JavaVmExitedError,
     JavaWindowAmbiguousError,
@@ -560,6 +562,24 @@ def _is_process_alive(pid: int) -> bool:
     return True
 
 
+def _window_not_found_error(
+    *, saw_java_window: bool
+) -> BridgeNotEnabledError | JavaWindowNotFoundError:
+    """Prefer the precise diagnostic when nothing on the desktop answers JAB.
+
+    Narrow on purpose: a visible Java window proves the bridge itself works,
+    so a miss with one present is a wrong selector, not a disabled bridge.
+    And ``.accessibility.properties`` is only one of the two ways JAB gets
+    enabled - a JVM may instead be started with
+    ``-Djavax.accessibility.assistive_technologies=...AccessBridge`` - so a
+    ``False`` from :func:`jab_enabled_for_current_user` is a hint, not proof,
+    which is why the message stays a recommendation rather than a claim.
+    """
+    if not saw_java_window and not jab_enabled_for_current_user():
+        return BridgeNotEnabledError(JAB_NOT_ENABLED_MESSAGE)
+    return JavaWindowNotFoundError("Java window was not found")
+
+
 def _create_runtime(
     dll_path: str | Path | None,
     timeout_ms: int,
@@ -770,6 +790,7 @@ class PlayJab:
         timeout: int,
     ) -> int:
         deadline = time.monotonic() + timeout / 1_000
+        saw_java_window = False
         while True:
             if pid is not None and not _is_process_alive(pid):
                 raise JavaProcessExitedError(f"process {pid} exited")
@@ -784,6 +805,7 @@ class PlayJab:
             if dead:
                 raise JavaVmExitedError(f"JVM for Java window {dead[0]:#x} has exited")
             matches = self._java_windows()
+            saw_java_window = saw_java_window or bool(matches)
             if hwnd is not None:
                 matches = [candidate for candidate in matches if candidate == hwnd]
             if title is not None:
@@ -806,7 +828,7 @@ class PlayJab:
                 return matches[0]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise JavaWindowNotFoundError("Java window was not found")
+                raise _window_not_found_error(saw_java_window=saw_java_window)
             self._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
 
@@ -1453,7 +1475,7 @@ class Locator:
                     owned: JavaRef | None = None
                     try:
                         for index in match.path:
-                            info = runtime.context_info(current)
+                            info = _context_info(runtime, current)
                             if actionable:
                                 self._check_actionable(
                                     _snapshot(info, self._window._api._registry)
@@ -1465,7 +1487,7 @@ class Locator:
                                 owned.close()
                             owned = child
                             current = child
-                        info = runtime.context_info(current)
+                        info = _context_info(runtime, current)
                         snapshot = _snapshot(info, self._window._api._registry)
                         if actionable:
                             self._check_actionable(snapshot)
@@ -1595,7 +1617,7 @@ class Locator:
 
     def check(self, timeout: int | None = None) -> None:
         wait, started, deadline = self._deadline(timeout)
-        if not self.is_checked(timeout=0):
+        if not self.is_checked(timeout=self._remaining_ms(deadline)):
             self.click(timeout=self._remaining_ms(deadline))
         self._wait_postcondition(
             lambda: self.is_checked(timeout=0), "checked", wait, started, deadline
@@ -1603,7 +1625,7 @@ class Locator:
 
     def uncheck(self, timeout: int | None = None) -> None:
         wait, started, deadline = self._deadline(timeout)
-        if self.is_checked(timeout=0):
+        if self.is_checked(timeout=self._remaining_ms(deadline)):
             self.click(timeout=self._remaining_ms(deadline))
         self._wait_postcondition(
             lambda: not self.is_checked(timeout=0),
@@ -1707,14 +1729,14 @@ class Locator:
         runtime: _RuntimeFacade,
         ref: JavaRef,
     ) -> list[tuple[int, str, str]]:
-        info = runtime.context_info(ref)
+        info = _context_info(runtime, ref)
         children: list[tuple[int, str, str]] = []
         for index in range(info.children_count):
             child = runtime.child(ref, index)
             if child is None:
                 continue
             try:
-                child_info = runtime.context_info(child)
+                child_info = _context_info(runtime, child)
                 children.append((index, child_info.name, child_info.role_en_us))
             finally:
                 child.close()
@@ -1731,7 +1753,7 @@ class Locator:
         def walk(parent: JavaRef, path: tuple[int, ...], depth: int) -> None:
             if depth > _MAX_TREE_DEPTH or seen[0] >= _MAX_TREE_NODES:
                 return
-            parent_info = runtime.context_info(parent)
+            parent_info = _context_info(runtime, parent)
             for index in range(parent_info.children_count):
                 if seen[0] >= _MAX_TREE_NODES:
                     return
@@ -1740,7 +1762,7 @@ class Locator:
                     continue
                 seen[0] += 1
                 try:
-                    child_info = runtime.context_info(child)
+                    child_info = _context_info(runtime, child)
                     child_path = (*path, index)
                     supports_selection = child_info.accessible_selection or bool(
                         child_info.accessible_interfaces
@@ -2375,8 +2397,8 @@ class TableLocator:
         columns = self.column_count(timeout=self._locator._remaining_ms(deadline))
         cells = tuple(
             tuple(
-                self.cell(row, column).text_content(
-                    timeout=self._locator._remaining_ms(deadline)
+                self.cell(row, column)._text(
+                    timeout=self._locator._remaining_ms(deadline), redact=True
                 )
                 for column in range(columns)
             )
@@ -2455,18 +2477,32 @@ class TableCellLocator:
         )
 
     def text_content(self, timeout: int | None = None) -> str:
+        """Read this cell's text. An explicit single-field read is not redacted."""
+        return self._text(timeout=timeout, redact=False)
+
+    def _text(self, *, timeout: int | None, redact: bool) -> str:
+        """Shared by ``text_content()`` and ``TableLocator.snapshot()``.
+
+        Only the bulk snapshot redacts a password cell's value; an explicit
+        read of one cell is the same contract ``Locator.text_content()``
+        already honours for a password node.
+        """
+
         def read(
             runtime: _RuntimeFacade,
             _context: JavaRef,
             cell: JavaRef,
             _info: TableCellInfo,
         ) -> str:
-            info = runtime.context_info(cell)
+            info = _context_info(runtime, cell)
+            text: str | None = None
             if info.accessible_text:
                 text = runtime.accessible_text(cell)
-                if text is not None:
-                    return text
-            return info.description or info.name
+            if text is None:
+                text = info.description or info.name
+            if redact and info.role_en_us == _PASSWORD_ROLE and text:
+                return "<redacted>"
+            return text
 
         return self._operate(read, timeout=timeout)
 

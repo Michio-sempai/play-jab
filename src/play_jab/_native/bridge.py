@@ -20,7 +20,7 @@ from play_jab._native.backend import (
     TableInfo,
     dll_backend_factory,
 )
-from play_jab._native.dll import jab_enabled_for_current_user
+from play_jab._native.dll import JAB_NOT_ENABLED_MESSAGE, jab_enabled_for_current_user
 from play_jab._native.refs import JavaRef
 from play_jab._native.types import MAX_STRING_SIZE
 from play_jab.exceptions import (
@@ -492,11 +492,7 @@ class BridgeRuntime:
                 + timeout
                 + "s of Windows_run()"
             )
-        return BridgeNotEnabledError(
-            "Java Access Bridge did not become ready and is not enabled for "
-            r"the current user. Enable it with `%JAVA_HOME%\bin\jabswitch "
-            "-enable` and restart the Java application."
-        )
+        return BridgeNotEnabledError(JAB_NOT_ENABLED_MESSAGE)
 
     def _serve(self, backend: NativeBackend) -> None:
         while True:

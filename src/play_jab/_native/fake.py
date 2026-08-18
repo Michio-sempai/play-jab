@@ -187,6 +187,25 @@ class FakeBackend:
         """Invalidate every outstanding context, as a Swing tree rebuild does."""
         self._stale.update(self._live)
 
+    def add_child(self, parent: FakeNode, child: FakeNode) -> None:
+        """Attach a node to a live tree, keeping the fake's own index consistent.
+
+        Tests used to append directly to ``parent.children`` and patch
+        ``_index_tree``/``_indexes`` by hand; that leaves ``_parents`` out of
+        sync and breaks the moment the fake's internal representation changes
+        for reasons unrelated to the test.
+        """
+        parent.children.append(child)
+        self._index_tree(child, parent=parent, index_in_parent=len(parent.children) - 1)
+
+    def remove_last_child(self, parent: FakeNode) -> None:
+        """Detach the most recently added child, undoing :meth:`add_child`."""
+        child = parent.children.pop()
+        key = id(child)
+        del self._parents[key]
+        del self._indexes[key]
+        self._pinned.remove(child)
+
     def _resolve(self, vm_id: int, context: int) -> FakeNode | None:
         """The node behind a cookie, or ``None`` if that context went stale.
 

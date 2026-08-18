@@ -122,9 +122,9 @@ up, and zero is a no-op. Scrollbar `accessible_value()` returns immutable
 
 | Symptom or exception | What to check |
 | --- | --- |
-| `BridgeNotEnabledError` | Run `jabswitch.exe -enable` as the same Windows user and restart the Java application. |
+| `BridgeNotEnabledError` | Raised when `attach()`/`window()` times out and no Java window on the desktop ever answered the bridge. Run `jabswitch.exe -enable` as the same Windows user and restart the Java application. |
 | `BridgeInitializationError` | Check `JAVA_HOME`, DLL availability, and Python/JAB bitness. |
-| `JavaWindowNotFoundError` | Confirm that the HWND still exists and belongs to a Java window. |
+| `JavaWindowNotFoundError` | At least one Java window exists, so the bridge itself works; confirm the HWND still exists and belongs to a Java window matching your selector. |
 | `JavaWindowNotAccessibleError` | Confirm JAB was enabled before the target JVM started. |
 | `JavaProcessExitedError` | The attached operating-system process ended. Start it again and attach a new session. |
 | `JavaVmExitedError` | The attached JVM announced shutdown; old locators and references cannot be reused. |

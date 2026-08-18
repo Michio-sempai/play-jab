@@ -9,13 +9,14 @@ from play_jab._native.bridge import BridgeRuntime
 from play_jab._native.fake import FakeBackend, FakeNode
 from play_jab.exceptions import (
     BridgeClosedError,
+    BridgeNotEnabledError,
     JavaProcessExitedError,
     JavaWindowAmbiguousError,
     JavaWindowNotFoundError,
 )
 from play_jab.sync_api import JavaWindowInfo, PlayJab
 
-from .conftest import FakeWindowBackend
+from .conftest import FakeWindowBackend, install_fake_runtime
 
 PID = 4321
 OTHER_PID = 9876
@@ -154,6 +155,64 @@ def test_attach_by_title_is_globally_strict(
     api, _, _, _, _ = api_backends
     with api, pytest.raises(JavaWindowAmbiguousError):
         api.attach(title="Main", timeout=0)
+
+
+def test_attach_reports_disabled_jab_when_no_java_window_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Java window anywhere on the desktop, and the properties file does
+    not enable the bridge: this is the precise, documented diagnostic for a
+    JAB that was never enabled, not a generic "window not found"."""
+    backend = FakeBackend({})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({}, visible=[]),
+        is_process_alive=lambda pid: True,
+    )
+    monkeypatch.setattr(sync_api, "jab_enabled_for_current_user", lambda: False)
+    with (
+        PlayJab(timeout=0) as api,
+        pytest.raises(BridgeNotEnabledError, match="jabswitch"),
+    ):
+        api.attach(title="Fixture")
+
+
+def test_attach_reports_window_not_found_when_jab_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Java window anywhere either, but the properties file *does* enable
+    the bridge: nothing to blame on JAB, so the generic diagnostic stands."""
+    backend = FakeBackend({})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({}, visible=[]),
+        is_process_alive=lambda pid: True,
+    )
+    monkeypatch.setattr(sync_api, "jab_enabled_for_current_user", lambda: True)
+    with PlayJab(timeout=0) as api, pytest.raises(JavaWindowNotFoundError):
+        api.attach(title="Fixture")
+
+
+def test_a_wrong_title_is_not_reported_as_disabled_jab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One Java window exists, the title just does not match: the bridge
+    plainly works, so a miss here must never be blamed on a disabled JAB -
+    even though the properties file (checked only as a last resort) would
+    say it is disabled."""
+    root = FakeNode(name="Main", role_en_us="frame", states_en_us="visible")
+    backend = FakeBackend({HWND: root})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Main"}, visible=[HWND]),
+        is_process_alive=lambda pid: True,
+    )
+    monkeypatch.setattr(sync_api, "jab_enabled_for_current_user", lambda: False)
+    with PlayJab(timeout=0) as api, pytest.raises(JavaWindowNotFoundError):
+        api.attach(title="No such window")
 
 
 def test_window_hwnd_must_belong_to_the_application_pid(

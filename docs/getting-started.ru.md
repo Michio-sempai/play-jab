@@ -122,9 +122,9 @@ setter не поддерживается JAB из JDK 17.
 
 | Симптом или исключение | Что проверить |
 | --- | --- |
-| `BridgeNotEnabledError` | Запустите `jabswitch.exe -enable` от имени того же пользователя и перезапустите Java-приложение. |
+| `BridgeNotEnabledError` | Выбрасывается, когда `attach()`/`window()` исчерпал таймаут и ни одно Java-окно на рабочем столе так и не ответило мосту. Запустите `jabswitch.exe -enable` от имени того же пользователя и перезапустите Java-приложение. |
 | `BridgeInitializationError` | Проверьте `JAVA_HOME`, наличие DLL и совпадение разрядности Python/JAB. |
-| `JavaWindowNotFoundError` | Убедитесь, что HWND существует и принадлежит Java-окну. |
+| `JavaWindowNotFoundError` | Хотя бы одно Java-окно существует, значит мост работает; убедитесь, что HWND существует и принадлежит Java-окну, подходящему под ваш селектор. |
 | `JavaWindowNotAccessibleError` | Убедитесь, что JAB был включён до запуска целевой JVM. |
 | `JavaProcessExitedError` | Attached-процесс ОС завершился; запустите его снова и создайте новую сессию. |
 | `JavaVmExitedError` | Attached JVM сообщила о shutdown; старые локаторы и ссылки нельзя использовать повторно. |

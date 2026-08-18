@@ -725,3 +725,66 @@ def test_check_raises_a_postcondition_timeout_when_the_state_never_settles(
         assert caught.value.expected == "checked"
         assert api.live_ref_count == 0
     assert backend.acquired == backend.released
+
+
+TABLE_SECRET = "hunter2-secret"  # noqa: S105 -- fixture value, not a real credential
+
+
+def _password_table_tree() -> FakeNode:
+    secret_cell = FakeNode(
+        name=TABLE_SECRET,
+        description=TABLE_SECRET,
+        role_en_us="password text",
+        states_en_us="enabled,visible,showing",
+    )
+    table = FakeNode(
+        name="Accounts",
+        role_en_us="table",
+        states_en_us="enabled,visible,showing",
+        table_cells=[[FakeNode(name="alice", role_en_us="label"), secret_cell]],
+    )
+    return FakeNode(
+        name="Fixture",
+        role_en_us="frame",
+        states_en_us="enabled,visible,showing",
+        children=[table],
+    )
+
+
+def test_table_snapshot_redacts_password_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeBackend({HWND: _password_table_tree()})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    with PlayJab(timeout=2_000) as api:
+        table = api.attach(pid=PID).window(hwnd=HWND).get_by_name("Accounts").as_table()
+        snapshot = table.snapshot()
+        assert TABLE_SECRET not in repr(snapshot)
+        assert snapshot.cells[0][1] == "<redacted>"
+        assert api.live_ref_count == 0
+    assert backend.acquired == backend.released
+
+
+def test_reading_one_password_cell_explicitly_still_returns_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`TableCellLocator.text_content()` is an explicit single-field read,
+    the same contract `Locator.text_content()` already honours for a
+    password node - only the bulk `TableLocator.snapshot()` redacts."""
+    backend = FakeBackend({HWND: _password_table_tree()})
+    install_fake_runtime(
+        monkeypatch,
+        backend,
+        windows=FakeWindowBackend({HWND: "Fixture"}, pid=PID),
+        is_process_alive=lambda pid: pid == PID,
+    )
+    with PlayJab(timeout=2_000) as api:
+        table = api.attach(pid=PID).window(hwnd=HWND).get_by_name("Accounts").as_table()
+        assert table.cell(0, 1).text_content() == TABLE_SECRET
+        assert api.live_ref_count == 0
+    assert backend.acquired == backend.released
