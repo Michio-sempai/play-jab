@@ -150,10 +150,10 @@ branch = true
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]
-# Linux CI skips the native Win32 adapter tests and starts near 86%; keep the
-# cross-platform gate just below that baseline. Windows development runs remain
-# near 90% and report their exact value.
-fail_under = 85.5
+# Linux CI skips the Windows ABI, DLL, and adapter tests and starts near 81%;
+# keep the cross-platform gate just below that baseline. Windows development
+# runs remain near 90% and report their exact value.
+fail_under = 80.5
 precision = 2
 show_missing = true
 skip_covered = true
