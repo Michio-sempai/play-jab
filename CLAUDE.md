@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Respond to the user in Russian**, per `AGENTS.md` (this is also configured at the system level for this project).
+**Respond to the user in Russian** (also configured at the system level for this project).
 
 ## What this is
 
@@ -170,6 +170,9 @@ code:
 - Integration tests (`tests/integration/`, marker `integration_jab`) build and
   launch the real Swing fixture app via Gradle and exercise the actual DLL;
   they're opt-in (`PLAY_JAB_RUN_INTEGRATION=1`) and Windows/JDK-17-only.
+- Name test functions `test_<behavior>`, and cover normal, error, and cleanup
+  paths — not just the happy path. Coverage is measured on `src/play_jab`;
+  don't let it drop on the code you touched.
 
 ## Style notes beyond the linters
 
@@ -185,7 +188,26 @@ code:
   E/F/W/isort); several WPS rules are deliberately disabled project-wide for
   ABI names, ctypes metadata, and explicit `__all__` exports — see the
   `extend-ignore` comment there before re-enabling one.
-- Commits follow Conventional Commits (enforced by commitizen); versioning is
-  CalVer (`YYYY.MM.PATCH[PYTAGNUM]`), not semver-from-commit-type — see
-  `CONTRIBUTING.md` for the full release procedure before bumping a version or
-  touching `CHANGELOG.md`.
+- Commits follow Conventional Commits (enforced by commitizen), each kept
+  focused; versioning is CalVer (`YYYY.MM.PATCH[PYTAGNUM]`), not
+  semver-from-commit-type — see `CONTRIBUTING.md` for the full release
+  procedure before bumping a version or touching `CHANGELOG.md`.
+
+## Pull requests
+
+Explain the behavioral change, link relevant issues, and list the commands
+run to verify it. Call out any Windows, JDK, DLL-bitness, or accessibility
+setup a reviewer needs to reproduce the verification. Include logs or
+screenshots when a GUI-facing failure or fix is hard to demonstrate in tests.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as markdown files in `.scratch/`. See
+`docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See
+`docs/agents/domain.md`.

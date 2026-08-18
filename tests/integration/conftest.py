@@ -692,7 +692,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     Non-Windows is a `skip`, not `pytest_configure`'s `pytest.exit`: exiting would
     also abort the portable unit suite when both trees are collected together
     (`uv run pytest tests`), which is exactly the cross-platform guarantee
-    AGENTS.md makes for that suite (integration-tests-review.md finding B-6).
+    CLAUDE.md makes for that suite (integration-tests-review.md finding B-6).
 
     The timeout is the other half of that same finding (B-3): this suite's whole
     subject is JAB hangs, so a regression that makes a call block forever must

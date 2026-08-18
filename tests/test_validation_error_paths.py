@@ -1,6 +1,6 @@
 """Argument validation and small diagnostic surfaces `sync_api.py` never exercises.
 
-AGENTS.md asks for focused unit tests on "normal, error, and cleanup paths".
+CLAUDE.md asks for focused unit tests on "normal, error, and cleanup paths".
 The error paths gathered here are cheap to prove wrong (most raise before any
 native call happens at all) but were previously invisible in coverage - see
 unit-tests-review.md section 4.1 for the full list this file closes.
