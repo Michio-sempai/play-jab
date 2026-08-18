@@ -163,20 +163,6 @@ fallback с JAB нет; после клика восстанавливаются
 Подготовка окружения, настройка JAB, доступные импорты и диагностика описаны в
 **[руководстве по началу работы](docs/getting-started.ru.md)**.
 
-## Skill для Claude Code
-
-Вместе с `play-jab` устанавливается консольная команда `play-jab-skill`,
-которая копирует встроенный [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
-в ваш проект — после этого Claude автоматически учитывает API, ограничения и
-исключения play-jab:
-
-```powershell
-python -m pip install play-jab
-play-jab-skill            # записывает .claude/skills/play-jab в текущий проект
-play-jab-skill --user     # записывает ~/.claude/skills/play-jab — для всех проектов
-play-jab-skill --force    # перезаписать существующую установку
-```
-
 ## Документация
 
 - [Начало работы](docs/getting-started.ru.md)
