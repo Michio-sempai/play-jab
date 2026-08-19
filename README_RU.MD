@@ -80,7 +80,7 @@ with PlayJab(timeout=5_000, dll_path=r"C:\JAB\WindowsAccessBridge-64.dll") as ja
 
     table = window.get_by_name("jobs.table").as_table()
     print(table.row_count(), table.column_count())
-    table.cell(7, 3).fill("Готово")
+    table.cell(7, 3).fill("Готово", force_input=True)
     table.cell(7, 3).wait_for_text("Done")
 ```
 
@@ -125,11 +125,22 @@ top-level Java-окна как дешёвые записи `JavaWindowInfo(hwnd,
 прочитать явно, но секреты скрываются из dump, snapshot, логов и ошибок. Индексы
 таблиц начинаются с нуля; `as_table()` предоставляет размеры, snapshot, headers,
 выделение строк, ячейки, ожидание текста и редактирование на месте через
-`cell(...).fill(value)`. Метод поддерживает стандартный видимый текстовый
-редактор Swing `JTable`: выбирает ячейку, передаёт ей фокус, открывает редактор
-по F2, заменяет текст через Unicode Win32 input, подтверждает Enter и проверяет
-модель таблицы через JAB. Для read-only и несовместимых custom editor-ов
-поднимается `UnsupportedActionError`.
+`cell(...).fill(value, force_input=True)`. В отличие от `Locator.fill()`,
+метод посылает настоящий Win32-ввод (смена foreground-окна, синтетические
+нажатия клавиш), поэтому требует интерактивной сессии и явного согласия
+через `force_input=True` — без него поднимается `InputNotAvailableError`.
+Метод поддерживает стандартный видимый текстовый редактор Swing `JTable`:
+выбирает ячейку, выводит окно на передний план и передаёт таблице фокус —
+именно в таком порядке, потому что настоящий `Component.requestFocus()`
+надёжно срабатывает только когда окно уже владеет ОС-фокусом, и это
+единственная часть активации, которую вообще можно подтвердить через JAB:
+`AccessibleContext` стандартной ячейки `JTable` не даёт отдельного сигнала
+«редактор открыт» — это ограничение самого Swing, а не библиотеки. Дальше
+метод нажимает F2, заменяет текст через Unicode Win32 input, подтверждает
+Enter и проверяет закоммиченную модель таблицы через JAB, повторяя всю
+последовательность активации в пределах таймаута, если ничего не
+изменилось. Для read-only и несовместимых custom editor-ов поднимается
+`UnsupportedActionError`; сбой самого Win32-ввода — `InputNotAvailableError`.
 
 Чтение (`snapshot`, `text_content`, атрибуты и ячейки таблицы) разрешено и для
 скрытых/disabled узлов. Действия требуют состояний visible, showing и enabled у

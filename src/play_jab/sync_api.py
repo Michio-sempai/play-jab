@@ -28,6 +28,7 @@ from play_jab._native.refs import JavaRef
 from play_jab.exceptions import (
     BridgeClosedError,
     BridgeNotEnabledError,
+    InputNotAvailableError,
     JavaProcessExitedError,
     JavaVmExitedError,
     JavaWindowAmbiguousError,
@@ -91,6 +92,14 @@ _VK_F2 = 0x71
 _VK_HOME = 0x24
 _VK_RETURN = 0x0D
 _WHEEL_DELTA = 120
+# Per-attempt budget for `TableCellLocator.fill()`: how long to wait for the
+# cell's committed value to change before concluding this attempt's keys
+# never reached a real editor and retrying the whole activation sequence
+# from scratch. There is no JAB-level "editor is open" signal to poll for
+# (see `fill()`'s docstring) -- a successful commit is genuinely fast once
+# focus is real (observed near-instant on real JAB), so handing one attempt
+# the *whole* fill() deadline would just starve every later retry.
+_EDIT_ACTIVATION_BUDGET_MS = 300
 _SYNTHETIC_INPUT_LOCK = threading.RLock()
 
 
@@ -2583,7 +2592,9 @@ class TableCellLocator:
                 )
             window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
 
-    def fill(self, value: str, timeout: int | None = None) -> None:
+    def fill(
+        self, value: str, *, force_input: bool = False, timeout: int | None = None
+    ) -> None:
         """Edit a standard Swing table cell in place and commit with Enter.
 
         A table cell's ``AccessibleContext`` obtained through
@@ -2591,79 +2602,133 @@ class TableCellLocator:
         *renderer*, which has no ``AccessibleText`` -- writing to it would
         never reach the table model (this is exactly why ``text_content()``
         falls back to ``description``/``name`` when ``accessible_text`` is
-        false). Selecting the cell, focusing its table and pressing F2 asks
-        Swing to install the live editor without guessing screen geometry.
-        ``AccessibleJTable`` keeps exposing renderer cells even while that
-        editor is active, so replacement text is delivered as Unicode Win32
-        input (Home, Delete, text, Enter) and the committed model is verified
-        via JAB.
+        false). Confirmed against real JAB: it stays that way for the
+        *entire* lifetime of an edit -- ``AccessibleJTable`` never exposes a
+        distinct "editing" signal for a standard cell editor on the cell
+        context itself, so there is no JAB-level way to confirm the editor
+        opened before typing.
+
+        What *is* reliable is table-level focus. Selecting the cell,
+        bringing the window to the OS foreground, then focusing the
+        *table* -- in that order, because a real ``Component.requestFocus()``
+        only reliably sticks once the window already owns OS-level
+        foreground -- makes ``Locator.focus()``'s own JAB-confirmed
+        ``"focused"`` wait a genuine precondition. Replacement text is then
+        delivered as Unicode Win32 input (Home, Delete, text, Enter) and the
+        committed model is verified via JAB; if nothing changed within a
+        short per-attempt slice of the deadline (keys landing before real
+        focus settled), the whole sequence retries rather than burning the
+        deadline waiting for a commit that will never come.
 
         This contract covers the standard text editor of a visible ``JTable``.
         A custom editor that does not accept this keyboard sequence is reported
         as unsupported.
+
+        Unlike ``Locator.fill()``, this sends real OS-level input (foreground
+        window changes, synthetic keystrokes) rather than going through
+        ``setTextContents``, so it requires an interactive desktop session
+        and an explicit ``force_input=True`` -- mirroring
+        ``Locator.click(opens_window=True)``.
         """
         if not isinstance(value, str):
             raise TypeError("fill() value must be a string")
+        if not force_input:
+            raise InputNotAvailableError(
+                "TableCellLocator.fill() sends synthetic Win32 keyboard "
+                "input; pass force_input=True to opt in explicitly"
+            )
 
         locator = self._table._locator
         wait, started, deadline = locator._deadline(timeout)
         window = locator._window
         windows = window._api._windows
 
+        def send(action: Callable[[], None]) -> None:
+            try:
+                action()
+            except OSError as error:
+                raise InputNotAvailableError(
+                    f"synthetic input failed: {error}"
+                ) from error
+
         original = self.text_content(timeout=locator._remaining_ms(deadline))
+        original_code_units = (
+            len(original.encode("utf-16-le", errors="surrogatepass")) // 2
+        )
 
         with _SYNTHETIC_INPUT_LOCK:
-            activation_sent = False
-            committed = False
-            try:
-                self._operate(
-                    lambda runtime, context, _cell, info: runtime.set_child_selected(
-                        context, info.index, True
-                    ),
-                    timeout=locator._remaining_ms(deadline),
-                    actionable=True,
-                )
-                locator.focus(timeout=locator._remaining_ms(deadline))
-                windows.set_foreground_window(window.hwnd)
-                windows.send_key(_VK_F2)
-                activation_sent = True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise UnsupportedActionError(
-                        f"cell ({self.row}, {self.column}) did not enter edit mode"
+            while True:
+                activation_sent = False
+                committed = False
+                try:
+                    self._operate(
+                        lambda runtime, context, _cell, info: (
+                            runtime.set_child_selected(context, info.index, True)
+                        ),
+                        timeout=locator._remaining_ms(deadline),
+                        actionable=True,
                     )
-                window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
-                windows.send_key(_VK_HOME)
-                original_code_units = (
-                    len(original.encode("utf-16-le", errors="surrogatepass")) // 2
-                )
-                windows.send_repeated_key(_VK_DELETE, original_code_units)
-                windows.send_text(value)
-                windows.send_key(_VK_RETURN)
-                while True:
-                    observed = self.text_content(timeout=0)
-                    if observed == value:
-                        committed = True
-                        return
+                    send(lambda: windows.set_foreground_window(window.hwnd))
+                    locator.focus(timeout=locator._remaining_ms(deadline))
+                    send(lambda: windows.send_key(_VK_F2))
+                    activation_sent = True
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        if observed == original:
-                            raise UnsupportedActionError(
-                                f"cell ({self.row}, {self.column}) did not "
-                                "accept in-place editing"
-                            )
-                        locator._raise_timeout(
-                            "cell text updated",
-                            wait,
-                            started=started,
-                            last_state=observed,
+                        raise UnsupportedActionError(
+                            f"cell ({self.row}, {self.column}) did not enter edit mode"
                         )
                     window._api._bridge.wait_for_event(min(_POLL_INTERVAL, remaining))
-            except Exception:
-                if activation_sent and not committed:
-                    with suppress(OSError):
-                        windows.send_key(_VK_ESCAPE)
-                raise
+                    send(lambda: windows.send_key(_VK_HOME))
+                    send(
+                        lambda: windows.send_repeated_key(
+                            _VK_DELETE, original_code_units
+                        )
+                    )
+                    send(lambda: windows.send_text(value))
+                    send(lambda: windows.send_key(_VK_RETURN))
+
+                    attempt_deadline = min(
+                        deadline, time.monotonic() + _EDIT_ACTIVATION_BUDGET_MS / 1_000
+                    )
+                    while True:
+                        observed = self.text_content(timeout=0)
+                        if observed == value:
+                            committed = True
+                            return
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            if observed == original:
+                                raise UnsupportedActionError(
+                                    f"cell ({self.row}, {self.column}) did not "
+                                    "accept in-place editing"
+                                )
+                            locator._raise_timeout(
+                                "cell text updated",
+                                wait,
+                                started=started,
+                                last_state=observed,
+                            )
+                        if (
+                            observed == original
+                            and time.monotonic() >= attempt_deadline
+                        ):
+                            # Nothing committed this attempt - but a real
+                            # editor may still be open with unsaved keys
+                            # (text_content() only ever reflects a *committed*
+                            # value, never a live editor buffer). Cancel it
+                            # before retrying so the next attempt's blind
+                            # Home/Delete/text/Enter cannot land on top of it.
+                            with suppress(OSError):
+                                windows.send_key(_VK_ESCAPE)
+                            break  # retry the whole activation from scratch
+                        window._api._bridge.wait_for_event(
+                            min(_POLL_INTERVAL, remaining)
+                        )
+                except Exception:
+                    if activation_sent and not committed:
+                        with suppress(OSError):
+                            windows.send_key(_VK_ESCAPE)
+                    raise
 
 
 def _reader_text_content(read: TextReader, snapshot: ElementSnapshot) -> str:

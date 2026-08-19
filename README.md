@@ -80,7 +80,7 @@ with PlayJab(timeout=5_000, dll_path=r"C:\JAB\WindowsAccessBridge-64.dll") as ja
 
     table = window.get_by_name("jobs.table").as_table()
     print(table.row_count(), table.column_count())
-    table.cell(7, 3).fill("Done")
+    table.cell(7, 3).fill("Done", force_input=True)
     table.cell(7, 3).wait_for_text("Done")
 ```
 
@@ -124,11 +124,22 @@ Form locators support `focus()`, `fill()`, `clear()`, `check()`, `uncheck()`,
 be read explicitly, but is redacted from dumps, snapshots, logs, and errors.
 Table indices are zero-based; `as_table()` exposes dimensions, snapshots,
 headers, row selection, cells, cell text waits, and in-place editing through
-`cell(...).fill(value)`. Cell fill targets the standard visible Swing
-`JTable` text editor: it selects and focuses the cell, opens the editor with
-F2, replaces its text through Unicode Win32 input, commits with Enter, and
-verifies the table model through JAB. Read-only or custom editors that do not
-accept this sequence raise `UnsupportedActionError`.
+`cell(...).fill(value, force_input=True)`. Unlike `Locator.fill()`, this
+sends real Win32 input (foreground window changes, synthetic keystrokes), so
+it requires an interactive session and explicit consent via
+`force_input=True` -- omitting it raises `InputNotAvailableError`. Cell fill
+targets the standard visible Swing `JTable` text editor: it selects the
+cell, brings the window to the OS foreground, and focuses the table -- in
+that order, because a real `Component.requestFocus()` only reliably sticks
+once the window already owns OS-level foreground, and that focus is the only
+part of activation JAB can actually confirm (a standard `JTable` cell's
+`AccessibleContext` never exposes a distinct "editor is open" signal, on
+real Swing, not just as a library limitation). It then presses F2, replaces
+the text through Unicode Win32 input, commits with Enter, and verifies the
+committed model through JAB, retrying the whole activation sequence within
+the timeout if nothing changed. Read-only or custom editors that do not
+accept this sequence raise `UnsupportedActionError`; a failure of the Win32
+input itself raises `InputNotAvailableError`.
 
 Reads (`snapshot`, `text_content`, attributes, table cells) also work for hidden
 or disabled nodes. Actions require the target and every ancestor to be visible,

@@ -11,6 +11,7 @@ __all__ = [
     "BridgeClosedError",
     "BridgeInitializationError",
     "BridgeNotEnabledError",
+    "InputNotAvailableError",
     "JavaProcessExitedError",
     "JavaReferenceClosedError",
     "JavaVmExitedError",
@@ -72,6 +73,20 @@ class JavaReferenceClosedError(PlayJabError):
 
 class JavaWindowNotFoundError(PlayJabError):
     """The requested window does not exist or is not a Java window."""
+
+
+class InputNotAvailableError(PlayJabError):
+    """Synthetic Win32 keyboard/mouse input was required but not available.
+
+    Raised both when a caller has not explicitly opted into an operation
+    that sends OS-level input (a ``force_input=True`` parameter was not
+    passed) and when the underlying Win32 call itself failed (for example, a
+    non-interactive session with no desktop to deliver input to). Both are
+    the same category of problem for a caller: this operation cannot drive
+    real keyboard/mouse input right now, and a broad ``except PlayJabError``
+    should catch it like every other play-jab failure -- unlike the raw
+    ``OSError`` this used to surface as.
+    """
 
 
 class JavaWindowNotAccessibleError(PlayJabError):

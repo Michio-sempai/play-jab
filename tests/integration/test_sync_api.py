@@ -16,7 +16,7 @@ from play_jab.exceptions import (
 )
 from play_jab.sync_api import PlayJab, contains
 
-from .conftest import DialogFixture, SwingFixture
+from .conftest import DialogFixture, SwingFixture, can_change_foreground_window
 
 pytestmark = pytest.mark.integration_jab
 
@@ -269,6 +269,11 @@ def test_forms_and_table_api_round_trip_through_real_jab(
 def test_table_cell_fill_round_trips_through_standard_swing_editor(
     swing_fixture: SwingFixture,
 ) -> None:
+    if not can_change_foreground_window(swing_fixture.hwnd):
+        pytest.skip(
+            "this session cannot change the Windows foreground window; "
+            "force_input=True fill() cannot be exercised here"
+        )
     with PlayJab(timeout=_API_TIMEOUT_MS) as api:
         window = api.attach(hwnd=swing_fixture.hwnd).window()
         tabs = window.get_by_name("fixture.tabs")
@@ -279,18 +284,18 @@ def test_table_cell_fill_round_trips_through_standard_swing_editor(
         try:
             for iteration in range(20):
                 value = f"Правка {iteration} 世界"
-                editable.fill(value)
+                editable.fill(value, force_input=True)
                 assert editable.text_content() == value
                 assert status.snapshot().description == f"cell={value}"
 
-            editable.fill("")
+            editable.fill("", force_input=True)
             assert editable.text_content() == ""
             assert status.snapshot().description == "cell="
 
             with pytest.raises(
                 UnsupportedActionError, match="did not accept in-place editing"
             ):
-                table.cell(7, 2).fill("read-only", timeout=500)
+                table.cell(7, 2).fill("read-only", force_input=True, timeout=500)
             assert api.live_ref_count == 0
         finally:
             window.get_by_name("fixture.reset_table_button").click()

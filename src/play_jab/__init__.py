@@ -20,6 +20,7 @@ from play_jab.sync_api import (
 BridgeClosedError = _exceptions.BridgeClosedError
 BridgeInitializationError = _exceptions.BridgeInitializationError
 BridgeNotEnabledError = _exceptions.BridgeNotEnabledError
+InputNotAvailableError = _exceptions.InputNotAvailableError
 JavaProcessExitedError = _exceptions.JavaProcessExitedError
 JavaVmExitedError = _exceptions.JavaVmExitedError
 JavaReferenceClosedError = _exceptions.JavaReferenceClosedError
@@ -44,6 +45,7 @@ __all__ = [
     "BridgeInitializationError",
     "BridgeNotEnabledError",
     "ElementSnapshot",
+    "InputNotAvailableError",
     "JavaApplication",
     "JavaProcessExitedError",
     "JavaReferenceClosedError",

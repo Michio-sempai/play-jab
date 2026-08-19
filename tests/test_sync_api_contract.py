@@ -15,6 +15,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from play_jab.exceptions import (
+    InputNotAvailableError,
     JavaProcessExitedError,
     JavaWindowAmbiguousError,
     LocatorError,
@@ -90,6 +91,7 @@ def test_the_public_types_are_exported_from_sync_api() -> None:
 @pytest.mark.parametrize(
     "exception_type",
     [
+        InputNotAvailableError,
         JavaProcessExitedError,
         JavaWindowAmbiguousError,
         LocatorError,
