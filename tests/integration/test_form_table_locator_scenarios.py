@@ -177,6 +177,63 @@ def test_synthetic_table_row_header_is_unreachable_through_real_jab(
             tabs.select_option(0)
 
 
+def test_column_and_row_header_are_unreachable_on_a_standard_swing_table_too(
+    swing_fixture: SwingFixture,
+) -> None:
+    """test-app-review.md finding K-2 assumed `column_header()` works through
+    the real bridge because `AccessibleJTable.getAccessibleColumnHeader()`
+    works in-process
+    (`SwingFixtureContractTest.realisticTableDimensionsMutationAndSelectionAreStable`)
+    - untested against real JAB until this test, which found it does **not**:
+    same root cause as `row_header()` on the synthetic table above.
+    `JTable.AccessibleJTable`'s private `AccessibleTableHeader` (backing both
+    `getAccessibleColumnHeader()` and the row-header path) is a bare
+    `AccessibleTable`, not an `Accessible`/`AccessibleContext` in its own
+    right, so the bridge cannot hand back a context/table handle for it -
+    a JDK/Swing-level limitation, not a synthetic-fixture artifact. Verified on
+    the real `fixture.table` (not `fixture.synthetic_table`), with the Table
+    tab actively selected, ruling out tab-visibility as the cause.
+    """
+    with PlayJab(timeout=_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(1)
+        try:
+            table = window.get_by_name("fixture.table").as_table()
+            with pytest.raises(UnsupportedActionError, match="table header"):
+                table.column_header(0).text_content()
+            with pytest.raises(UnsupportedActionError, match="table header"):
+                table.row_header(0).text_content()
+            assert api.live_ref_count == 0
+        finally:
+            tabs.select_option(0)
+
+
+def test_table_row_count_status_reflects_table_model_add_and_remove(
+    swing_fixture: SwingFixture,
+) -> None:
+    """`fixture.table_row_count_status` publishes `"rows=<N>"` from a real
+    `TableModelListener` (`SwingFixtureApp.java:930-932`), the only fixture
+    signal proven to be driven by a genuine model event rather than
+    polling-friendly coincidence - never exercised until now
+    (test-app-review.md finding, Приоритет 2 п.6).
+    """
+    with PlayJab(timeout=_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(1)
+        try:
+            status = window.get_by_name("fixture.table_row_count_status")
+            assert status.snapshot().description == f"rows={_TABLE_ROWS}"
+            window.get_by_name("fixture.table_add_row_button").click()
+            assert status.snapshot().description == f"rows={_TABLE_ROWS + 1}"
+            window.get_by_name("fixture.table_remove_row_button").click()
+            assert status.snapshot().description == f"rows={_TABLE_ROWS}"
+            assert api.live_ref_count == 0
+        finally:
+            tabs.select_option(0)
+
+
 def _wait_for_accessible_value(
     locator: Locator, expected: str, *, timeout_s: float = 5.0
 ) -> None:

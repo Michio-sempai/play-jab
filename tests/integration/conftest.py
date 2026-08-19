@@ -203,6 +203,8 @@ def _user32() -> ctypes.WinDLL:
     dll.SetForegroundWindow.restype = ctypes.c_bool
     dll.GetForegroundWindow.argtypes = []
     dll.GetForegroundWindow.restype = ctypes.c_void_p
+    dll.GetDpiForWindow.argtypes = [ctypes.c_void_p]
+    dll.GetDpiForWindow.restype = ctypes.c_uint
     return dll
 
 
@@ -230,6 +232,20 @@ def can_change_foreground_window(hwnd: int) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+def primary_display_scale_percent(hwnd: int) -> int:
+    """The real Windows display scale for the monitor `hwnd` is on.
+
+    Not the same thing as the JVM's own `-Dsun.java2d.uiScale`
+    (`swing_fixture_dpi_125` below): that flag scales Swing's own rendering
+    inside the process, not Windows' display scaling, and cannot reproduce the
+    DPI-unaware/physical-coordinate mismatch the synthetic-input path
+    (`SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)`) exists to correct.
+    `GetDpiForWindow` reports the real per-monitor value; 96 is 100%
+    (test-app-review.md finding K-3).
+    """
+    return round(_user32().GetDpiForWindow(hwnd) / 96 * 100)
 
 
 def _window_for_process(process_id: int) -> int | None:
@@ -555,6 +571,28 @@ def swing_fixture_no_auto_node(
     command = _fixture_command(java_fixture_build, "swing")
     command.insert(1, "-Dfixture.autoNode=false")
     with _running_jvm(java_fixture_build, "swing-no-auto-node", command) as launched:
+        process, stdout_log, stderr_log = launched
+        hwnd = _wait_for_window(process, stdout_log, stderr_log)
+        _wait_for_accessible_windows(process, jab_dll_path, _WINDOW_TITLE)
+        yield SwingFixture(hwnd, process, stdout_log, stderr_log)
+
+
+@pytest.fixture
+def swing_fixture_custom_role(
+    jab_dll_path: Path,
+    java_fixture_build: JavaFixtureBuild,
+) -> Iterator[SwingFixture]:
+    """A fresh Swing fixture JVM with an extra tab holding one node whose
+    `AccessibleRole` ("fixture custom role") is not in `play_jab.registry`'s
+    standard role table (`-Dfixture.customRole=true`). Opt-in and not the
+    session-scoped `swing_fixture` on purpose: this node reproduces, by design,
+    the defect where an unrecognized role anywhere in a scanned subtree aborts
+    the *entire* traversal - enabling it unconditionally would break every other
+    test's default `PlayJab()` usage (test-app-review.md finding K-1).
+    """
+    command = _fixture_command(java_fixture_build, "swing")
+    command.insert(1, "-Dfixture.customRole=true")
+    with _running_jvm(java_fixture_build, "swing-custom-role", command) as launched:
         process, stdout_log, stderr_log = launched
         hwnd = _wait_for_window(process, stdout_log, stderr_log)
         _wait_for_accessible_windows(process, jab_dll_path, _WINDOW_TITLE)

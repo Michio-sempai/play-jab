@@ -16,11 +16,16 @@ import pytest
 from play_jab.exceptions import LocatorError
 from play_jab.sync_api import Locator, PlayJab
 
-from .conftest import SwingFixture, can_change_foreground_window
+from .conftest import (
+    SwingFixture,
+    can_change_foreground_window,
+    primary_display_scale_percent,
+)
 
 pytestmark = pytest.mark.integration_jab
 
 _TIMEOUT_MS = 5_000
+_UNSCALED_DISPLAY_PERCENT = 100
 # Overshoots the scrollbar's 0..1440 range so the exact per-notch increment
 # does not matter: JScrollBar clamps to its max/min on its own.
 _LARGE_SCROLL_STEPS = 200
@@ -216,6 +221,14 @@ def test_click_and_scroll_survive_125_percent_dpi_scaling(
         pytest.skip(
             "this session cannot change the Windows foreground window; "
             "opens_window=True cannot be exercised here"
+        )
+    scale = primary_display_scale_percent(swing_fixture_dpi_125.hwnd)
+    if scale == _UNSCALED_DISPLAY_PERCENT:
+        pytest.skip(
+            f"primary monitor is at {scale}% Windows display scaling; this test "
+            "needs a real 125% monitor to exercise the DPI-unaware/physical "
+            "coordinate mismatch (`-Dsun.java2d.uiScale` alone cannot reproduce "
+            "it - test-app-review.md finding K-3)"
         )
     with PlayJab(timeout=_TIMEOUT_MS) as api:
         window = api.attach(hwnd=swing_fixture_dpi_125.hwnd).window()

@@ -150,6 +150,32 @@ def test_locator_chaining_strictness_states_and_unicode(
         assert api.live_ref_count == 0
 
 
+def test_select_option_selects_tab_page_by_exact_accessible_name(
+    swing_fixture: SwingFixture,
+) -> None:
+    """`select_option()` already accepts an exact accessible name, not just an
+    index, but no test had ever exercised it against `fixture.tabs`' named
+    pages (test-app-review.md finding, Приоритет 2 п.6)."""
+    with PlayJab(timeout=_API_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        try:
+            tabs.select_option("fixture.tab_table_page")
+            assert window.get_by_name("fixture.table").exists()
+            tabs.select_option("fixture.tab_form_page")
+            assert window.get_by_name("fixture.submit_button").exists()
+            assert api.live_ref_count == 0
+        finally:
+            tabs.select_option(0)
+
+
+def test_disabled_button_reports_not_enabled(swing_fixture: SwingFixture) -> None:
+    with PlayJab(timeout=_API_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        assert window.get_by_name("fixture.disabled_button").is_enabled() is False
+        assert api.live_ref_count == 0
+
+
 def test_polling_observes_automatic_attachment_cycle(
     swing_fixture: SwingFixture,
 ) -> None:
@@ -302,4 +328,49 @@ def test_virtualized_workloads_and_replacement_use_lazy_locators(
             assert api.live_ref_count == 0
         finally:
             window.get_by_name("fixture.virtual_list_start_button").click()
+            tabs.select_option(0)
+
+
+def test_showing_only_prunes_the_collapsed_tree_subtree_on_real_jab(
+    swing_fixture: SwingFixture,
+) -> None:
+    """`docs/performance.md:189` credits `showing_only=True` pruning a
+    `collapsed` subtree with "up to 50x cold" - proven so far only against
+    `FakeBackend`, where `collapsed` nodes are artificially marked `showing`
+    (`test_batched_traversal.py:539-542` admits as much). This is the first
+    check against a real, static (non-lazy) Swing `JTree`: every one of the 40
+    groups' 5 items genuinely exists in `DefaultTreeModel` regardless of
+    expansion state - `showing_only=False` reaches all 241 descendants
+    (measured), each collapsed item reporting `role="unknown"`, empty name and
+    `bounds=(-1,-1,-1,-1)` (JAB never rendered it) but still present as a node
+    `showing_only=False` counts. `showing_only=True` is asserted to exclude
+    every single one of those 200 items, not just fewer of them - a total
+    number of *visible* rows would be viewport/DPI/font-dependent (the same
+    caveat already measured for `fixture.table` cells), but "zero
+    role=unknown items in a showing_only scan while a collapsed group is
+    selected" is not (test-app-review.md finding B-2).
+    """
+    with PlayJab(timeout=10_000) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(4)
+        try:
+            # Deterministic regardless of what earlier tests in this
+            # session-scoped fixture left expanded/collapsed/scrolled.
+            window.get_by_name("fixture.virtual_tree_collapse_button").click()
+            window.get_by_name("fixture.virtual_tree_reset_button").click()
+            window.get_by_name("fixture.virtual_tree_status").wait_for("attached")
+
+            tree = window.get_by_name("fixture.virtual_tree")
+            all_nodes = tree.locator(showing_only=False).all_snapshots()
+            assert len(all_nodes) == 1 + 40 + 40 * 5
+            hidden_items = [node for node in all_nodes if node.role == "unknown"]
+            assert len(hidden_items) == 40 * 5
+
+            showing_nodes = tree.locator(showing_only=True).all_snapshots()
+            assert len(showing_nodes) < len(all_nodes)
+            assert not any(node.role == "unknown" for node in showing_nodes)
+            assert api.live_ref_count == 0
+        finally:
+            window.get_by_name("fixture.virtual_tree_expand_button").click()
             tabs.select_option(0)
