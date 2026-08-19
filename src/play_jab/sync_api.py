@@ -2324,11 +2324,25 @@ class TableLocator:
         return TableCellLocator(self, row, column)
 
     def row_header(self, row: int) -> TableCellLocator:
+        """Read a row header cell, if the application publishes one.
+
+        A standard Swing ``JTable`` never does, and neither does
+        ``column_header()`` below: both are backed by ``AccessibleJTable``
+        header objects that are a bare ``AccessibleTable``, not an
+        ``Accessible``/``AccessibleContext`` in their own right, so the bridge
+        cannot hand back a context/table handle for either - a JDK/Swing-level
+        limitation, always raising ``UnsupportedActionError`` against real
+        Swing tables (verified against JDK 17; test-app-review.md finding
+        K-2). These methods exist for third-party ``Accessible``/
+        ``AccessibleTable`` implementations that do publish real headers.
+        """
         if isinstance(row, bool) or not isinstance(row, int) or row < 0:
             raise TableIndexError("row index must be a non-negative integer")
         return TableCellLocator(self, row, 0, header="row")
 
     def column_header(self, column: int) -> TableCellLocator:
+        """Read a column header cell. See ``row_header()`` for why this is
+        also unreachable on a standard Swing ``JTable`` through real JAB."""
         if isinstance(column, bool) or not isinstance(column, int) or column < 0:
             raise TableIndexError("column index must be a non-negative integer")
         return TableCellLocator(self, 0, column, header="column")
