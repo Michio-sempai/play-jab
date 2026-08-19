@@ -1,3 +1,19 @@
+## v2026.08.9 (2026-08-19)
+
+### BREAKING CHANGE
+
+- `play-jab-skill` no longer exists as a console script.
+
+### Feat
+
+- remove the bundled Claude Code skill and its installer CLI
+
+### Fix
+
+- heal TableCellLocator.fill()'s activation race and require explicit consent
+- unpin the correct FakeNode in FakeBackend.remove_last_child()
+- heal action-path staleness, wait for check/uncheck, redact table passwords, diagnose disabled JAB
+
 ## v2026.08.8 (2026-08-18)
 
 ### Feat
