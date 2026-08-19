@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.accessibility.Accessible;
 import javax.accessibility.AccessibleContext;
 import javax.accessibility.AccessibleRole;
+import javax.accessibility.AccessibleSelection;
 import javax.accessibility.AccessibleTable;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -223,6 +224,74 @@ final class SwingFixtureContractTest {
             assertEquals(100, table.getRowCount());
             removeRow.doClick(); // repeated click is a no-op below the base row count
             assertEquals(100, table.getRowCount());
+            return null;
+        });
+    }
+
+    /**
+     * `TableCellLocator.fill()` (sync_api.py) assumes `AccessibleSelection.
+     * addAccessibleSelection(row * columnCount + column)` makes `(7, 3)` the
+     * table's leading row/column selection in the fixture's default ("mixed")
+     * selection mode - see the class-level Javadoc's "Selection" section for why
+     * that is not the same as real cell-selection mode. This locks the Java-side
+     * half of that assumption down independently of the library (test-app-review.md
+     * finding В-1).
+     */
+    @Test
+    void mixedModeSelectionMakesTheMutableCellTheLeadingSelection() throws Exception {
+        onEdt(() -> {
+            SwingFixtureApp app = new SwingFixtureApp();
+            JPanel tab = app.buildTableTab();
+            JTable table = find(tab, "fixture.table", JTable.class);
+            AccessibleSelection selection = table.getAccessibleContext().getAccessibleSelection();
+
+            selection.addAccessibleSelection(7 * 5 + 3);
+
+            assertEquals(7, table.getSelectedRow());
+            assertEquals(3, table.getSelectedColumn());
+            return null;
+        });
+    }
+
+    /**
+     * The other half of the same assumption: with the mutable cell selected as its
+     * own selection anchor, entering edit mode at that anchor actually installs
+     * the live editor there, including immediately after a tab switch with no
+     * settling delay - the exact state `TableCellLocator.fill()` observes on its
+     * first call. test-app-review.md finding В-1.
+     *
+     * <p>This does <b>not</b> go through `BasicTableUI`'s `"startEditing"` action
+     * (F2's real key binding) - discovered empirically while writing this test:
+     * that action's first line is {@code if (!table.hasFocus()) { table.
+     * requestFocus(); return; }}, so without genuine AWT keyboard focus (which a
+     * headless-safe JUnit test with no displayed window cannot grant) it silently
+     * no-ops instead of editing. `editCellAt` is what the action delegates to
+     * *after* that focus check passes, so this test proves the selection/
+     * editability half of the contract; whether `sync_api.py`'s synthetic F2 keeps
+     * true OS focus on the table for the whole round trip is exactly the kind of
+     * question this focus precondition raises for К-5 and is out of this ticket's
+     * scope.
+     */
+    @Test
+    void editCellAtEntersEditModeForTheSelectedMutableCellRightAfterATabSwitch()
+            throws Exception {
+        onEdt(() -> {
+            SwingFixtureApp app = new SwingFixtureApp();
+            JTabbedPane tabs = app.buildTabs();
+            tabs.setSelectedIndex(1); // Table, right after the switch - no settling delay
+            JTable table = find(tabs, "fixture.table", JTable.class);
+            table.getAccessibleContext().getAccessibleSelection().addAccessibleSelection(7 * 5 + 3);
+
+            int anchorRow = table.getSelectionModel().getAnchorSelectionIndex();
+            int anchorColumn = table.getColumnModel().getSelectionModel().getAnchorSelectionIndex();
+            assertEquals(7, anchorRow);
+            assertEquals(3, anchorColumn);
+
+            assertTrue(table.editCellAt(anchorRow, anchorColumn));
+            assertTrue(table.isEditing());
+            assertEquals(7, table.getEditingRow());
+            assertEquals(3, table.getEditingColumn());
+            table.getCellEditor().cancelCellEditing();
             return null;
         });
     }

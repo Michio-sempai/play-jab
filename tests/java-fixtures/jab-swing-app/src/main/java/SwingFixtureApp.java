@@ -15,6 +15,8 @@ import java.awt.event.WindowEvent;
 import java.util.Arrays;
 import java.util.Locale;
 import javax.accessibility.Accessible;
+import javax.accessibility.AccessibleContext;
+import javax.accessibility.AccessibleRole;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.DefaultListModel;
@@ -34,6 +36,7 @@ import javax.swing.JPasswordField;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSlider;
+import javax.swing.JSpinner;
 import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
@@ -43,6 +46,7 @@ import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.UIManager;
+import javax.swing.SpinnerNumberModel;
 import javax.swing.UnsupportedLookAndFeelException;
 import javax.swing.WindowConstants;
 import javax.swing.table.DefaultTableModel;
@@ -72,6 +76,11 @@ import javax.swing.tree.DefaultTreeModel;
  * поведение не зависит от L&amp;F). {@code -Dfixture.autoNode=false} — отключает
  * 3000&nbsp;мс цикл {@code fixture.auto_node} целиком, для тестов точного
  * live-reference count, которым мешает его собственный attach/detach трафик.
+ * {@code -Dfixture.customRole=true} — добавляет шестую вкладку
+ * {@code fixture.tab_custom_role_page} с узлом нестандартной accessible-роли
+ * ({@link #buildCustomRoleTab()}); намеренно ломает {@code get_by_name} от корня
+ * окна для любого {@code PlayJab()} без {@code extra_roles}, поэтому не включён по
+ * умолчанию (test-app-review.md, находка К-1).
  *
  * <h2>Accessible-имена (стабильные, не зависят от локали)</h2>
  * <pre>
@@ -565,6 +574,12 @@ public final class SwingFixtureApp {
         nameTabPage(tabs, 2, "fixture.tab_dynamic_page");
         nameTabPage(tabs, 3, "fixture.tab_locator_page");
         nameTabPage(tabs, 4, "fixture.tab_workloads_page");
+        // Opt-in, deliberately not part of the default fixture - see
+        // buildCustomRoleTab()'s Javadoc and test-app-review.md finding К-1.
+        if ("true".equals(System.getProperty("fixture.customRole"))) {
+            tabs.addTab("Custom Role", buildCustomRoleTab());
+            nameTabPage(tabs, tabs.getTabCount() - 1, "fixture.tab_custom_role_page");
+        }
         return tabs;
     }
 
@@ -1255,19 +1270,13 @@ public final class SwingFixtureApp {
      * implement it too, through their own default {@code AccessibleContext}, with
      * no extra wiring required.
      *
-     * <p>{@code JSpinner} was deliberately left out: its JAB-reported role
-     * ("spinbox") is not in {@code play_jab.registry}'s role table, and
-     * {@code sync_api.py}'s tree walker snapshots every visited node
-     * unconditionally - an unrecognized role anywhere in a subtree aborts the
-     * *entire* walk with {@code UnsupportedAccessibleRoleError}, not just
-     * resolution of that one node. Since a {@code JTabbedPane} keeps every tab's
-     * content in the accessible tree regardless of which tab is selected, that
-     * would have broken every {@code get_by_name} call from the window root
-     * across the whole suite, not merely spinner-focused tests - confirmed
-     * empirically before this comment was written. Adding {@code JSpinner} back
-     * requires a library-side fix (registering "spinbox" and/or hardening the
-     * walker to skip unsupported roles instead of aborting), which is out of this
-     * testing-only plan's scope.
+     * <p>{@code JSpinner} was deliberately left out of an earlier version of this
+     * fixture because its JAB-reported role ("spinbox") was not in
+     * {@code play_jab.registry}'s role table, and an unrecognized role anywhere in
+     * a scanned subtree aborts the *entire* walk (see {@link #buildCustomRoleTab()}
+     * for the fixture that now reproduces that defect on purpose, opt-in). Role
+     * "spinbox" has since been registered ({@code registry.py}), so {@code JSpinner}
+     * is safe to include unconditionally again - test-app-review.md finding К-1.
      */
     private static JPanel buildValuePanel() {
         JProgressBar progressBar = new JProgressBar(0, 100);
@@ -1277,11 +1286,76 @@ public final class SwingFixtureApp {
         JSlider slider = new JSlider(0, 10, 3);
         slider.getAccessibleContext().setAccessibleName("fixture.slider");
 
+        JSpinner spinner = new JSpinner(new SpinnerNumberModel(5, 0, 10, 1));
+        spinner.getAccessibleContext().setAccessibleName("fixture.value_spinner");
+
         JPanel valuePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         valuePanel.getAccessibleContext().setAccessibleName("fixture.value_panel");
         valuePanel.add(progressBar);
         valuePanel.add(slider);
+        valuePanel.add(spinner);
         return valuePanel;
+    }
+
+    /**
+     * {@code -Dfixture.customRole=true} adds a sixth tab carrying one node whose
+     * {@code AccessibleRole} ("fixture custom role") is not in
+     * {@code play_jab.registry}'s standard role table - reproducing on purpose the
+     * defect the {@code JSpinner} comment above used to describe: an unrecognized
+     * role anywhere in a scanned subtree aborts the *entire* traversal, not just
+     * resolution of that one node, because {@code JTabbedPane} keeps every tab's
+     * content in the accessible tree regardless of which tab is selected. This is
+     * opt-in, not part of the default fixture, precisely because it breaks
+     * {@code get_by_name} from the window root for every other test using
+     * {@code PlayJab()} without {@code extra_roles} - test-app-review.md finding
+     * К-1. {@code fixture.custom_role_control_button} is an ordinary button beside
+     * it, used to prove the *other* node's role - not the tab's mere presence - is
+     * what breaks the scan.
+     */
+    private static JPanel buildCustomRoleTab() {
+        JButton control = new JButton("Control");
+        control.getAccessibleContext().setAccessibleName("fixture.custom_role_control_button");
+
+        CustomRoleLabel widget = new CustomRoleLabel("custom role widget");
+        widget.getAccessibleContext().setAccessibleName("fixture.custom_role_widget");
+
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        panel.getAccessibleContext().setAccessibleName("fixture.custom_role_panel");
+        panel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+        panel.add(control);
+        panel.add(widget);
+        return panel;
+    }
+
+    /** Backs {@link #buildCustomRoleTab()}'s deliberately-unrecognized-role node. */
+    private static final class CustomRoleLabel extends JLabel {
+        private static final long serialVersionUID = 1L;
+
+        // AccessibleRole's constructor is protected; an anonymous subclass is the
+        // standard way JDK/Swing code itself mints application-specific roles.
+        private static final AccessibleRole CUSTOM_ROLE =
+                new AccessibleRole("fixture custom role") {
+                    private static final long serialVersionUID = 1L;
+                };
+
+        CustomRoleLabel(String text) {
+            super(text);
+        }
+
+        @Override
+        public AccessibleContext getAccessibleContext() {
+            if (accessibleContext == null) {
+                accessibleContext = new AccessibleJLabel() {
+                    private static final long serialVersionUID = 1L;
+
+                    @Override
+                    public AccessibleRole getAccessibleRole() {
+                        return CUSTOM_ROLE;
+                    }
+                };
+            }
+            return accessibleContext;
+        }
     }
 
     private static JPanel buildDuplicateScope(String name, String description) {

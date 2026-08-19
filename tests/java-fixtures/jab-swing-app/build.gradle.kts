@@ -71,8 +71,11 @@ tasks.register<JavaExec>("runDialogRepro") {
 tasks.register<JavaExec>("runDialogRepro125") {
     group = "application"
     description =
-        "Show the JDialog JAB-access regression fixture at 125% Windows display " +
-        "scaling (CONCEPT.MD §7's DPI matrix requirement for the dialog fixture)."
+        "Show the JDialog JAB-access regression fixture with Swing's own " +
+        "rendering scaled 125% (-Dsun.java2d.uiScale=1.25). This does NOT set " +
+        "Windows display scaling and cannot substitute for a real 125% monitor " +
+        "when checking CONCEPT.MD §7's DPI matrix requirement " +
+        "(test-app-review.md finding К-3)."
     mainClass.set("FixtureLauncher")
     classpath = sourceSets["main"].runtimeClasspath
     jvmArgs = jabJvmArgs + listOf("-Dsun.java2d.uiScale=1.25")
