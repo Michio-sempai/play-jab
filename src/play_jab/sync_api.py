@@ -103,6 +103,29 @@ _EDIT_ACTIVATION_BUDGET_MS = 300
 _SYNTHETIC_INPUT_LOCK = threading.RLock()
 
 
+def _to_physical_point(
+    windows: WindowBackend, hwnd: int, x: int, y: int
+) -> tuple[int, int]:
+    """Map a point from `hwnd`'s JAB-logical space to physical screen pixels.
+
+    `SetCursorPos` -- called under `PER_MONITOR_AWARE_V2` thread context --
+    expects physical pixels, but JAB reports `AccessibleComponent` bounds in
+    the target window's own logical space (a non-DPI-aware/system-DPI-aware
+    JVM, which a typical Swing UI is, never sees the real per-monitor
+    scale or position). The raw JAB coordinates can be off by both scale
+    *and* offset -- confirmed on a real 3-monitor, mixed-DPI, mixed-scale
+    desktop: a plain DPI-ratio scale (checked and rejected first) still
+    landed on the wrong monitor's geometry and missed by roughly a menu
+    item's height, dismissing an open popup instead of clicking inside it,
+    with no error raised anywhere in the chain (the click still "succeeds",
+    just on the wrong pixel). `LogicalToPhysicalPointForPerMonitorDPI` is the
+    Win32 API built for exactly this legacy-app-coordinate translation, and
+    it is what `logical_to_physical_point` delegates to -- don't reintroduce
+    a manual scale/offset computation here.
+    """
+    return windows.logical_to_physical_point(hwnd, x, y)
+
+
 @dataclass(frozen=True, slots=True)
 class _Contains:
     text: str
@@ -246,6 +269,10 @@ class WindowBackend(Protocol):
 
     def set_thread_dpi_awareness_context(self, context: int) -> int: ...
 
+    def logical_to_physical_point(
+        self, hwnd: int, x: int, y: int
+    ) -> tuple[int, int]: ...
+
     def send_left_click(self) -> None: ...
 
     def send_mouse_wheel(self, delta: int) -> None: ...
@@ -361,6 +388,11 @@ class _Win32WindowBackend:
         self._user32.SetCursorPos.restype = wintypes.BOOL
         self._user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
         self._user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        self._user32.LogicalToPhysicalPointForPerMonitorDPI.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.POINT),
+        ]
+        self._user32.LogicalToPhysicalPointForPerMonitorDPI.restype = wintypes.BOOL
         self._configure_input()
 
     def _configure_input(self) -> None:
@@ -463,6 +495,14 @@ class _Win32WindowBackend:
         if not previous:
             raise ctypes.WinError(ctypes.get_last_error())
         return int(previous)
+
+    def logical_to_physical_point(self, hwnd: int, x: int, y: int) -> tuple[int, int]:
+        point = self._wintypes.POINT(x, y)
+        if not self._user32.LogicalToPhysicalPointForPerMonitorDPI(
+            hwnd, ctypes.byref(point)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(point.x), int(point.y)
 
     def send_left_click(self) -> None:
         inputs = (self._input * 2)()
@@ -1871,6 +1911,7 @@ class Locator:
         x = snapshot.x + snapshot.width // 2
         y = snapshot.y + snapshot.height // 2
         windows = self._window._api._windows
+        x, y = _to_physical_point(windows, self._window.hwnd, x, y)
         with _SYNTHETIC_INPUT_LOCK:
             previous_dpi = windows.set_thread_dpi_awareness_context(
                 _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
@@ -1905,6 +1946,7 @@ class Locator:
             x = snapshot.x + snapshot.width // 2
             y = snapshot.y + snapshot.height // 2
             windows = self._window._api._windows
+            x, y = _to_physical_point(windows, self._window.hwnd, x, y)
             with _SYNTHETIC_INPUT_LOCK:
                 previous_dpi = windows.set_thread_dpi_awareness_context(
                     _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2

@@ -44,6 +44,7 @@ class FakeWindowBackend:
         visible: list[int] | None = None,
         cursor: tuple[int, int] = (0, 0),
         dpi_context: int = 0,
+        point_translation: Callable[[int, int, int], tuple[int, int]] | None = None,
         guard_input: bool = False,
         on_key: Callable[[int], None] | None = None,
         on_text: Callable[[str], None] | None = None,
@@ -54,6 +55,11 @@ class FakeWindowBackend:
         self.visible = list(visible) if visible is not None else list(self.titles)
         self.cursor = cursor
         self.dpi_context = dpi_context
+        # `logical_to_physical_point(hwnd, x, y)` -> `(px, py)`, independent
+        # of `dpi_context` above (the calling *thread's* DPI-awareness
+        # context). Defaults to the identity mapping so existing
+        # fixtures/tests keep asserting raw JAB coordinates unchanged.
+        self.point_translation = point_translation or (lambda _hwnd, x, y: (x, y))
         self.guard_input = guard_input
         self.on_key = on_key
         self.on_text = on_text
@@ -97,6 +103,11 @@ class FakeWindowBackend:
         previous, self.dpi_context = self.dpi_context, context
         self.calls.append(("dpi", context))
         return previous
+
+    def logical_to_physical_point(self, hwnd: int, x: int, y: int) -> tuple[int, int]:
+        physical = self.point_translation(hwnd, x, y)
+        self.calls.append(("logical_to_physical", hwnd, x, y, physical))
+        return physical
 
     def send_left_click(self) -> None:
         self._guard("send_left_click")

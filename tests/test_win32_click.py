@@ -69,6 +69,7 @@ def test_opens_window_click_uses_fresh_center_and_restores_cursor_and_dpi(
     locator.click(opens_window=True)
 
     assert windows.calls == [
+        ("logical_to_physical", HWND, 115, 220, (115, 220)),
         ("dpi", -4),
         ("get_cursor",),
         ("foreground", HWND),
@@ -79,6 +80,68 @@ def test_opens_window_click_uses_fresh_center_and_restores_cursor_and_dpi(
     ]
     assert backend.performed_actions == []
     assert api.live_ref_count == 0
+
+
+def test_click_maps_jab_coordinates_through_logical_to_physical_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The click point must go through `logical_to_physical_point`, unmodified.
+
+    Regression for a real miss against a Swing app on a 3-monitor,
+    mixed-DPI, mixed-scale desktop: JAB reports `AccessibleComponent` bounds
+    in the *target window's* own logical space (a non-DPI-aware JVM, which
+    a typical Swing UI is, never sees the real per-monitor scale or
+    position), but `SetCursorPos` -- called under `PER_MONITOR_AWARE_V2` --
+    takes physical screen pixels. A plain DPI-ratio scale was tried and
+    rejected first: it still landed on the wrong monitor's geometry and
+    missed by roughly a menu item's height, enough to land outside an
+    already-open popup menu and silently dismiss it instead of clicking the
+    item inside it -- confirmed live, no exception raised anywhere in the
+    chain (the click still "succeeds", just on the wrong pixel).
+    `LogicalToPhysicalPointForPerMonitorDPI` (exercised here through the fake
+    as an arbitrary offset+scale, matching what a real mixed-monitor desktop
+    produces) is the fix that was confirmed correct against the real desktop.
+    """
+    target = FakeNode(
+        name="Open",
+        role_en_us="push button",
+        states_en_us="enabled,visible,showing",
+        x=100,
+        y=200,
+        width=31,
+        height=41,
+    )
+    backend = FakeBackend(
+        {
+            HWND: FakeNode(
+                name="Fixture",
+                role_en_us="frame",
+                states_en_us="enabled,visible,showing",
+                children=[target],
+            )
+        }
+    )
+    runtime = BridgeRuntime(lambda: backend)
+    # An arbitrary offset+scale, standing in for what
+    # LogicalToPhysicalPointForPerMonitorDPI does on a real mixed-monitor
+    # desktop -- not a pure scale (a pure DPI ratio was the bug).
+    windows = FakeWindowBackend(
+        {HWND: "Fixture"},
+        pid=PID,
+        point_translation=lambda _hwnd, x, y: (x + 163, y + 48),
+    )
+    monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
+    monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
+
+    with PlayJab(timeout=0) as api:
+        window = api.attach(pid=PID).window()
+        window.get_by_name("Open").click(opens_window=True)
+
+    # Logical center is (115, 220); the fake's translation maps that to
+    # (278, 268) -- not the raw logical point.
+    assert ("logical_to_physical", HWND, 115, 220, (278, 268)) in windows.calls
+    assert ("set_cursor", 278, 268) in windows.calls
 
 
 def test_mouse_click_restores_cursor_and_dpi_when_input_raises(

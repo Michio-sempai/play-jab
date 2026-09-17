@@ -86,6 +86,11 @@ class StubUser32:
         def set_thread_dpi_awareness_context(_context: Any) -> int:
             return 1
 
+        def logical_to_physical_point_for_per_monitor_dpi(
+            _hwnd: int, _point_ref: Any
+        ) -> int:
+            return TRUE
+
         def send_input(count: int, _inputs: Any, _size: int) -> int:
             self.send_counts.append(count)
             return count
@@ -100,6 +105,9 @@ class StubUser32:
         self.GetCursorPos = get_cursor_pos
         self.SetCursorPos = set_cursor_pos
         self.SetThreadDpiAwarenessContext = set_thread_dpi_awareness_context
+        self.LogicalToPhysicalPointForPerMonitorDPI = (
+            logical_to_physical_point_for_per_monitor_dpi
+        )
         self.SendInput = send_input
 
 
