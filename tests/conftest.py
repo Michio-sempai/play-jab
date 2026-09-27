@@ -48,6 +48,7 @@ class FakeWindowBackend:
         guard_input: bool = False,
         on_key: Callable[[int], None] | None = None,
         on_text: Callable[[str], None] | None = None,
+        raise_unless_dpi_context: int | None = None,
     ) -> None:
         self.titles = dict(titles) if titles is not None else {DEFAULT_HWND: "Fixture"}
         self.pid = pid
@@ -60,6 +61,13 @@ class FakeWindowBackend:
         # context). Defaults to the identity mapping so existing
         # fixtures/tests keep asserting raw JAB coordinates unchanged.
         self.point_translation = point_translation or (lambda _hwnd, x, y: (x, y))
+        # Models the real `LogicalToPhysicalPointForPerMonitorDPI` failing
+        # (`OSError: [WinError 0]`) unless the calling thread is already in
+        # this DPI-awareness context - confirmed against a real window where
+        # every point, including its own origin, failed identically until
+        # the context was set first (regression for the call-order bug fixed
+        # alongside this fake: the conversion used to run before the switch).
+        self.raise_unless_dpi_context = raise_unless_dpi_context
         self.guard_input = guard_input
         self.on_key = on_key
         self.on_text = on_text
@@ -105,6 +113,16 @@ class FakeWindowBackend:
         return previous
 
     def logical_to_physical_point(self, hwnd: int, x: int, y: int) -> tuple[int, int]:
+        if (
+            self.raise_unless_dpi_context is not None
+            and self.dpi_context != self.raise_unless_dpi_context
+        ):
+            self.calls.append(("logical_to_physical", hwnd, x, y, None))
+            raise OSError(
+                "LogicalToPhysicalPointForPerMonitorDPI failed (fake: calling "
+                f"thread's dpi context is {self.dpi_context!r}, needs "
+                f"{self.raise_unless_dpi_context!r})"
+            )
         physical = self.point_translation(hwnd, x, y)
         self.calls.append(("logical_to_physical", hwnd, x, y, physical))
         return physical

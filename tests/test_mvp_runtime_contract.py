@@ -123,6 +123,46 @@ def test_scroll_sends_wheel_deltas_and_restores_cursor_and_dpi(
     assert backend.acquired == backend.released
 
 
+def test_scroll_converts_coordinates_only_after_the_dpi_context_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as `test_win32_click.py`'s matching test, for `scroll()`'s
+    own `logical_to_physical_point`/`set_thread_dpi_awareness_context` pair."""
+    scrollbar = FakeNode(
+        name="scrollbar",
+        role_en_us="scroll bar",
+        states_en_us="visible,showing,enabled",
+        accessible_interfaces=int(AccessibleInterface.VALUE),
+        value="40",
+        minimum_value="0",
+        maximum_value="100",
+        x=10,
+        y=20,
+        width=30,
+        height=40,
+    )
+    root = FakeNode(
+        name="root",
+        role_en_us="frame",
+        states_en_us="visible,showing,enabled",
+        children=[scrollbar],
+    )
+    backend = FakeBackend({HWND: root})
+    runtime = BridgeRuntime(lambda: backend, pump_interval=0.001)
+    windows = FakeWindowBackend(
+        {HWND: "Fixture"},
+        pid=PID,
+        dpi_context=0,
+        raise_unless_dpi_context=-4,
+    )
+    monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
+    monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
+    with PlayJab(timeout=20) as api:
+        window = api.attach(pid=PID).window(hwnd=HWND)
+        window.get_by_name("scrollbar").scroll(1, timeout=0)
+
+
 def test_timeout_diagnostic_is_structured_and_bounded(
     mvp_api: tuple[PlayJab, JavaWindow, FakeBackend, FakeWindowBackend],
 ) -> None:

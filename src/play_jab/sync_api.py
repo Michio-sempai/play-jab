@@ -1911,13 +1911,20 @@ class Locator:
         x = snapshot.x + snapshot.width // 2
         y = snapshot.y + snapshot.height // 2
         windows = self._window._api._windows
-        x, y = _to_physical_point(windows, self._window.hwnd, x, y)
         with _SYNTHETIC_INPUT_LOCK:
+            # `LogicalToPhysicalPointForPerMonitorDPI` (inside `_to_physical_point`)
+            # itself needs the calling thread already under
+            # `PER_MONITOR_AWARE_V2` - called beforehand it silently no-ops on
+            # some windows and hard-fails with `OSError: [WinError 0]` on others
+            # (confirmed against JabDialogRepro's own top-level frame: every
+            # point, including the window's own origin, fails identically until
+            # the context is set first - not a bounds/geometry issue).
             previous_dpi = windows.set_thread_dpi_awareness_context(
                 _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
             )
             previous_cursor: tuple[int, int] | None = None
             try:
+                x, y = _to_physical_point(windows, self._window.hwnd, x, y)
                 previous_cursor = windows.get_cursor_position()
                 windows.set_foreground_window(self._window.hwnd)
                 windows.set_cursor_position(x, y)
@@ -1946,13 +1953,15 @@ class Locator:
             x = snapshot.x + snapshot.width // 2
             y = snapshot.y + snapshot.height // 2
             windows = self._window._api._windows
-            x, y = _to_physical_point(windows, self._window.hwnd, x, y)
             with _SYNTHETIC_INPUT_LOCK:
+                # See the matching comment in `_click_with_mouse`: the
+                # conversion must happen after the context switch, not before.
                 previous_dpi = windows.set_thread_dpi_awareness_context(
                     _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
                 )
                 previous_cursor: tuple[int, int] | None = None
                 try:
+                    x, y = _to_physical_point(windows, self._window.hwnd, x, y)
                     previous_cursor = windows.get_cursor_position()
                     windows.set_foreground_window(self._window.hwnd)
                     windows.set_cursor_position(x, y)

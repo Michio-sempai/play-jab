@@ -69,8 +69,8 @@ def test_opens_window_click_uses_fresh_center_and_restores_cursor_and_dpi(
     locator.click(opens_window=True)
 
     assert windows.calls == [
-        ("logical_to_physical", HWND, 115, 220, (115, 220)),
         ("dpi", -4),
+        ("logical_to_physical", HWND, 115, 220, (115, 220)),
         ("get_cursor",),
         ("foreground", HWND),
         ("set_cursor", 115, 220),
@@ -80,6 +80,57 @@ def test_opens_window_click_uses_fresh_center_and_restores_cursor_and_dpi(
     ]
     assert backend.performed_actions == []
     assert api.live_ref_count == 0
+
+
+def test_click_converts_coordinates_only_after_the_dpi_context_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `logical_to_physical_point` used to run *before*
+    `set_thread_dpi_awareness_context(PER_MONITOR_AWARE_V2)`, not after.
+
+    Confirmed against a real field report and reproduced
+    locally against play-jab's own JabDialogRepro fixture: the real
+    `LogicalToPhysicalPointForPerMonitorDPI` failed with `OSError:
+    [WinError 0]` for *every* point on that window - including the window's
+    own origin - while the calling thread was still in its original DPI
+    context, and succeeded unconditionally once switched to
+    `PER_MONITOR_AWARE_V2` first. `SwingFixtureApp`'s own (larger) window
+    happened to convert successfully either way, which is what let this slip
+    through undetected until a small window (the field report's nested
+    dialog; here, JabDialogRepro's own top-level frame) exposed it.
+    """
+    target = FakeNode(
+        name="Open",
+        role_en_us="push button",
+        states_en_us="enabled,visible,showing",
+        x=10,
+        y=20,
+        width=31,
+        height=41,
+    )
+    backend = FakeBackend(
+        {
+            HWND: FakeNode(
+                name="Fixture",
+                role_en_us="frame",
+                states_en_us="enabled,visible,showing",
+                children=[target],
+            )
+        }
+    )
+    runtime = BridgeRuntime(lambda: backend)
+    windows = FakeWindowBackend(
+        {HWND: "Fixture"},
+        pid=PID,
+        dpi_context=0,
+        raise_unless_dpi_context=-4,
+    )
+    monkeypatch.setattr(sync_api, "_create_runtime", lambda _path, _timeout: runtime)
+    monkeypatch.setattr(sync_api, "_create_window_backend", lambda: windows)
+    monkeypatch.setattr(sync_api, "_is_process_alive", lambda pid: pid == PID)
+    with PlayJab(timeout=0) as api:
+        window = api.attach(pid=PID).window()
+        window.get_by_name("Open").click(opens_window=True)
 
 
 def test_click_maps_jab_coordinates_through_logical_to_physical_point(
