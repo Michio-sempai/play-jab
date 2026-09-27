@@ -25,6 +25,7 @@ from play_jab._native.bridge import BridgeRuntime, TextReader, Verdict
 from play_jab._native.dll import JAB_NOT_ENABLED_MESSAGE, jab_enabled_for_current_user
 from play_jab._native.manager import RuntimeManager, RuntimeSession
 from play_jab._native.refs import JavaRef
+from play_jab._native.types import MAX_ACTIONS_TO_DO
 from play_jab.exceptions import (
     BridgeClosedError,
     BridgeNotEnabledError,
@@ -124,6 +125,26 @@ def _to_physical_point(
     a manual scale/offset computation here.
     """
     return windows.logical_to_physical_point(hwnd, x, y)
+
+
+def _require_int_value(raw: str) -> int:
+    """Parse an AccessibleValue string, failing with a message that names
+    the actual out-of-scope cause instead of Python's generic ``int()``
+    error.
+
+    ``Locator.set_value()`` is scoped to integer, unit-step components; a
+    non-integer AccessibleValue (a JSpinner on a float/date model, out of
+    scope by design) would otherwise raise a bare ``ValueError`` that looks
+    identical to the documented "value outside range" error, hiding which
+    contract was actually violated.
+    """
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"set_value() only supports integer AccessibleValue components; "
+            f"could not parse {raw!r} as an int"
+        ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1657,6 +1678,113 @@ class Locator:
             timeout=timeout,
             interface=AccessibleInterface.VALUE,
         )
+
+    def set_value(self, value: int, timeout: int | None = None) -> None:
+        """Set the current AccessibleValue of a slider/spinner-like component.
+
+        Reads current/minimum/maximum via ``AccessibleValue``, then applies
+        the needed number of "increment"/"decrement" ``AccessibleAction``s -
+        batched up to the native call's own limit - and waits until
+        ``accessible_value()`` reflects ``value``. Unlike ``click()``'s
+        ``opens_window=True`` or ``TableCellLocator.fill()``, this is a pure
+        JAB-native path: no synthetic Win32 input, no interactive desktop
+        requirement, no consent flag.
+
+        Scoped to integer, unit-step components (a real ``JSlider``, and a
+        ``JSpinner`` backed by an integer ``SpinnerNumberModel`` with step 1)
+        - confirmed empirically against both that a batch of N same-named
+        actions in one native call applies N steps, not one. Locale-dependent
+        action names, ``snapToTicks``, and a non-integer/non-unit step are
+        not covered by this method.
+
+        Raises ``ValueError`` if ``value`` is outside ``[minimum, maximum]``;
+        ``UnsupportedActionError`` if the component exposes neither
+        "increment" nor "decrement" for the direction needed;
+        ``LocatorTimeoutError`` if a whole batch of actions produces no
+        change in the current value (the component ignored it, or its step
+        is not 1) - raised immediately rather than waiting out the rest of
+        the deadline - or if the value never settles to ``value`` within
+        ``timeout``.
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("value must be an int")
+
+        wait, started, deadline = self._deadline(timeout)
+
+        def read_range_and_actions(
+            runtime: _RuntimeFacade,
+            ref: JavaRef,
+            _snapshot: ElementSnapshot,
+        ) -> tuple[int, int, int, tuple[str, ...]]:
+            current, minimum, maximum = runtime.accessible_value_range(ref)
+            if current is None or minimum is None or maximum is None:
+                raise NativeCallError("getAccessibleValue", reason="incomplete value")
+            return (
+                _require_int_value(current),
+                _require_int_value(minimum),
+                _require_int_value(maximum),
+                runtime.accessible_actions(ref),
+            )
+
+        current, minimum, maximum, actions = self._operate(
+            read_range_and_actions,
+            timeout=self._remaining_ms(deadline),
+            actionable=True,
+            interface=AccessibleInterface.VALUE,
+        )
+        if not minimum <= value <= maximum:
+            raise ValueError(f"value {value} is outside [{minimum}, {maximum}]")
+
+        state = f"value {value!r} reached"
+        while current != value:
+            if time.monotonic() >= deadline:
+                self._raise_timeout(state, wait, started=started, last_state=current)
+            name = "increment" if value > current else "decrement"
+            action = next((a for a in actions if a.casefold() == name), None)
+            if action is None:
+                raise UnsupportedActionError(
+                    f"locator has no {name!r} action; available actions: {actions!r}"
+                )
+            batch = (action,) * min(abs(value - current), MAX_ACTIONS_TO_DO)
+
+            def apply_batch(
+                runtime: _RuntimeFacade,
+                ref: JavaRef,
+                _snapshot: ElementSnapshot,
+                *,
+                batch: tuple[str, ...] = batch,
+            ) -> int:
+                runtime.do_accessible_actions(ref, batch)
+                new_current, _minimum, _maximum = runtime.accessible_value_range(ref)
+                if new_current is None:
+                    raise NativeCallError(
+                        "getAccessibleValue", reason="incomplete value"
+                    )
+                return _require_int_value(new_current)
+
+            before = current
+            current = self._operate(
+                apply_batch,
+                timeout=self._remaining_ms(deadline),
+                actionable=True,
+                interface=AccessibleInterface.VALUE,
+            )
+            if current == before:
+                self._raise_timeout(state, wait, started=started, last_state=current)
+
+        def settled() -> bool:
+            # accessible_value() can itself raise NativeCallError on a
+            # transient incomplete read (the three getters are not one
+            # atomic native call) - _wait_postcondition only retries on
+            # _StaleLocatorError/LocatorTimeoutError, so a bare propagation
+            # here would turn a momentary race into a hard crash instead of
+            # another poll.
+            try:
+                return self.accessible_value(timeout=0).current == str(value)
+            except NativeCallError:
+                return False
+
+        self._wait_postcondition(settled, state, wait, started, deadline)
 
     def is_checked(self, timeout: int | None = None) -> bool:
         return "checked" in self.snapshot(timeout=timeout).states

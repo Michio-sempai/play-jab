@@ -152,7 +152,17 @@ Enter и проверяет закоммиченную модель таблиц
 Явный `scroll(steps)` посылает wheel над целью: положительные значения
 прокручивают вниз, отрицательные вверх, ноль ничего не делает. Автопрокрутки при
 поиске нет. `accessible_value()` возвращает неизменяемые строковые
-current/minimum/maximum; setter отсутствует в JAB из JDK 17.
+current/minimum/maximum; прямого setter'а в нативном JAB нет.
+
+`set_value(value)` записывает целочисленный компонент `AccessibleValue` с
+единичным шагом (`JSlider`, либо `JSpinner` на целочисленной модели с шагом 1)
+через пакетные `increment`/`decrement` `AccessibleAction`, дожидаясь, что
+значение реально применилось — чисто нативный JAB-путь, как `click()` без
+`opens_window`, без синтетического ввода:
+
+```python
+window.get_by_name("volume.slider").set_value(75)
+```
 
 `click()` использует синхронный JAB `AccessibleAction` элемента. Если его
 обработчик открывает модальный `JDialog`, вызов может оставаться заблокированным

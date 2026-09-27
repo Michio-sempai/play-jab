@@ -157,6 +157,16 @@ print(scrollbar.accessible_value())
 window.get_by_name("jobs.list").scroll(6)
 ```
 
+`set_value(value)` writes an integer, unit-step `AccessibleValue` component
+(a `JSlider`, or a `JSpinner` on an integer step-1 model) by batching
+`increment`/`decrement` `AccessibleAction`s and waiting for the value to
+settle -- a pure JAB-native path, like `click()` without `opens_window`, not
+synthetic input:
+
+```python
+window.get_by_name("volume.slider").set_value(75)
+```
+
 Positive `scroll()` steps move down and negative steps move up. Cursor position
 and DPI context are restored even when Win32 input fails.
 

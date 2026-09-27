@@ -79,6 +79,13 @@ class FakeNode:
     value: str | None = None
     minimum_value: str | None = None
     maximum_value: str | None = None
+    # Real "increment"/"decrement" AccessibleAction moves an integer
+    # AccessibleValue by exactly the requested step count (confirmed against
+    # a real JSlider/JSpinner - a batch of N same-named actions applies N
+    # steps, not one). False models a component that advertises the action
+    # but does not actually respond to it (e.g. a stuck editor), for testing
+    # the "no progress" abort path.
+    applies_value_step: bool = True
     focused: bool = False
     selected_children: set[int] = field(default_factory=set)
     table_cells: list[list[FakeNode]] | None = None
@@ -363,6 +370,18 @@ class FakeBackend:
                 else:
                     states.add("checked")
                 node.states_en_us = ",".join(sorted(states))
+            elif (
+                action.casefold() in {"increment", "decrement"}
+                and node.applies_value_step
+                and node.value is not None
+            ):
+                step = 1 if action.casefold() == "increment" else -1
+                new_value = int(node.value) + step
+                if node.minimum_value is not None:
+                    new_value = max(new_value, int(node.minimum_value))
+                if node.maximum_value is not None:
+                    new_value = min(new_value, int(node.maximum_value))
+                node.value = str(new_value)
         return True, -1
 
     def get_accessible_text(self, vm_id: int, context: int) -> str | None:

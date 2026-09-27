@@ -64,3 +64,54 @@ def test_spinner_is_reachable_with_the_now_standard_spinbox_role(
             assert api.live_ref_count == 0
         finally:
             tabs.select_option(0)
+
+
+def test_set_value_increments_and_decrements_a_real_slider(
+    swing_fixture: SwingFixture,
+) -> None:
+    """Confirms against the real DLL that a batch of N "increment"/"decrement"
+    AccessibleActions in one native call applies N steps, not one - the key
+    empirical fact set_value()'s batching relies on (feature request:
+    play-jab-feature-request-set-value.md)."""
+    with PlayJab(timeout=_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(3)
+        try:
+            slider = window.get_by_name("fixture.slider")
+            assert slider.accessible_value().current == "3"
+
+            slider.set_value(8)
+            assert slider.accessible_value().current == "8"
+
+            slider.set_value(1)
+            assert slider.accessible_value().current == "1"
+
+            slider.set_value(1)  # delta=0, must be a no-op
+            assert slider.accessible_value().current == "1"
+
+            with pytest.raises(ValueError, match=r"outside \[0, 10\]"):
+                slider.set_value(11)
+            assert api.live_ref_count == 0
+        finally:
+            slider.set_value(3)  # restore for any test that runs after this one
+            tabs.select_option(0)
+
+
+def test_set_value_works_the_same_way_on_a_real_spinner(
+    swing_fixture: SwingFixture,
+) -> None:
+    with PlayJab(timeout=_TIMEOUT_MS) as api:
+        window = api.attach(hwnd=swing_fixture.hwnd).window()
+        tabs = window.get_by_name("fixture.tabs")
+        tabs.select_option(3)
+        try:
+            spinner = window.get_by_name("fixture.value_spinner")
+            assert spinner.accessible_value().current == "5"
+
+            spinner.set_value(9)
+            assert spinner.accessible_value().current == "9"
+            assert api.live_ref_count == 0
+        finally:
+            spinner.set_value(5)
+            tabs.select_option(0)
