@@ -204,10 +204,16 @@ screenshots when a GUI-facing failure or fix is hard to demonstrate in tests.
 
 ### Issue tracker
 
-Issues are tracked as markdown files in `.scratch/`. See
+Задачи хранятся markdown-файлами в `.scratch/`. См.
 `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Пять стандартных ролей triage (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`), названия меток не менялись.
+См. `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See
+Single-context: `CONTEXT.md` + `docs/adr/` в корне репозитория. См.
 `docs/agents/domain.md`.
