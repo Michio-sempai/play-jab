@@ -1,3 +1,13 @@
+## v2026.09.1 (2026-09-27)
+
+### Feat
+
+- add Locator.set_value() for slider/spinner AccessibleValue components
+
+### Fix
+
+- convert click/scroll coordinates only after switching DPI context
+
 ## v2026.09.0 (2026-09-17)
 
 ### BREAKING CHANGE
