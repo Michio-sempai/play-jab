@@ -49,10 +49,9 @@ release month plus a release counter within that month:
 ## Release
 
 ```sh
-OLD_VERSION=2026.08.1
 NEW_VERSION=2026.08.2
 uv run bumpver update --patch
-uv run cz changelog --start-rev "v$OLD_VERSION" --unreleased-version "v$NEW_VERSION"
+uv run cz changelog --incremental --unreleased-version "v$NEW_VERSION"
 git add pyproject.toml CHANGELOG.md
 git commit -m "chore: release $NEW_VERSION"
 git tag -a "v$NEW_VERSION" -m "v$NEW_VERSION"
