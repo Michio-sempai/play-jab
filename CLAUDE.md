@@ -36,9 +36,13 @@ uv run pytest tests/integration
 ```
 
 `PLAY_JAB_JAVA_EXE` / `PLAY_JAB_DLL` override automatic JDK/DLL discovery when
-needed. Integration fixtures build and launch the Swing app in
-`tests/java-fixtures/jab-swing-app/` (Gradle) on demand via
-`tests/integration/conftest.py`.
+needed. `PLAY_JAB_DEMO_APP_JAR` overrides the Swing fixture JAR discovery.
+Integration fixtures launch that JAR directly (`java -jar`); play-jab never
+compiles it. The JAR is built and committed in the separate
+[`play-jab-demo-app`](https://gitlab.com/dashanovsd/play-jab-demo-app) repo,
+found by default as a sibling checkout at
+`../play-jab-demo-app/dist/jab-swing-app.jar` (see
+`tests/integration/conftest.py`).
 
 CI (`.gitlab-ci.yml`) runs `ruff`, `flake8-wps`, and `mypy` as separate lint
 jobs, then `test` across Python 3.11–3.14 (unit tests only), then `build`, then
@@ -167,9 +171,10 @@ code:
   forgot to release/close its `PlayJab` instance. If you hit this failure in
   an unrelated test, look for a missing `close()`/context-manager in a test
   that ran earlier in the same file.
-- Integration tests (`tests/integration/`, marker `integration_jab`) build and
-  launch the real Swing fixture app via Gradle and exercise the actual DLL;
-  they're opt-in (`PLAY_JAB_RUN_INTEGRATION=1`) and Windows/JDK-17-only.
+- Integration tests (`tests/integration/`, marker `integration_jab`) launch the
+  real Swing fixture app (a pre-built JAR from `play-jab-demo-app`) and
+  exercise the actual DLL; they're opt-in (`PLAY_JAB_RUN_INTEGRATION=1`) and
+  Windows/JDK-17-only.
 - Name test functions `test_<behavior>`, and cover normal, error, and cleanup
   paths — not just the happy path. Coverage is measured on `src/play_jab`;
   don't let it drop on the code you touched.

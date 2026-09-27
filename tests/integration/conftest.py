@@ -1,11 +1,13 @@
 """Fixtures for the opt-in Java Access Bridge integration suite.
 
 Set ``PLAY_JAB_RUN_INTEGRATION=1`` on an interactive Windows runner with JDK 17.
-The suite compiles the checked-in Swing fixture, resolves ``java`` from ``PATH``
-then ``JAVA_HOME``, and resolves a bitness-compatible DLL from ``JAVA_HOME``/
-``System32``. ``PLAY_JAB_JAVA_EXE`` and ``PLAY_JAB_DLL`` override those two
-discoveries respectively. The disabled-JAB scenario additionally requires an
-isolated user profile and ``PLAY_JAB_ISOLATED_DISABLED_PROFILE=1``.
+The suite launches the pre-built Swing fixture JAR from the sibling
+``play-jab-demo-app`` repository (see ``_demo_app_jar_path`` below), resolves
+``java`` from ``PATH`` then ``JAVA_HOME``, and resolves a bitness-compatible
+DLL from ``JAVA_HOME``/``System32``. ``PLAY_JAB_JAVA_EXE`` and ``PLAY_JAB_DLL``
+override those two discoveries respectively. The disabled-JAB scenario
+additionally requires an isolated user profile and
+``PLAY_JAB_ISOLATED_DISABLED_PROFILE=1``.
 """
 
 from __future__ import annotations
@@ -62,41 +64,47 @@ class DialogFixture:
 
 @dataclass(frozen=True, slots=True)
 class JavaFixtureBuild:
-    """Session-built Java classes and persistent diagnostic-log directory."""
+    """The pre-built demo-app JAR and a persistent diagnostic-log directory."""
 
-    root: Path
-    classes: Path
+    jar_path: Path
     log_directory: Path
 
 
 _JVM_SEQUENCE = itertools.count(1)
+
+_DEMO_APP_JAR_OVERRIDE = "PLAY_JAB_DEMO_APP_JAR"
 
 
 def _integration_requested() -> bool:
     return os.environ.get(_OPT_IN, "").lower() in {"1", "true", "yes"}
 
 
-def _fixture_root() -> Path:
-    return Path(__file__).parents[1] / "java-fixtures" / "jab-swing-app"
+def _demo_app_jar_path() -> Path:
+    """Resolve the play-jab-demo-app Swing fixture JAR.
 
-
-def _compile_fixture(root: Path) -> None:
-    wrapper = root / "gradlew.bat"
-    if not wrapper.is_file():
-        pytest.fail(f"Gradle wrapper is missing: {wrapper}")
-    completed = subprocess.run(
-        [str(wrapper), "--no-daemon", "classes"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=180,
-    )
-    if completed.returncode:
-        pytest.fail(
-            "Could not compile the Java integration fixture.\n"
-            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    play-jab never builds this JAR itself - it is compiled and committed in
+    the separate play-jab-demo-app repository (see that repo's README).
+    ``PLAY_JAB_DEMO_APP_JAR`` overrides the default, which assumes
+    play-jab-demo-app is checked out as a sibling of this repository, matching
+    ``docs/agents/issue-tracker.md``'s local-development layout.
+    """
+    explicit = os.environ.get(_DEMO_APP_JAR_OVERRIDE)
+    if explicit:
+        candidate = Path(explicit)
+    else:
+        candidate = (
+            Path(__file__).parents[3]
+            / "play-jab-demo-app"
+            / "dist"
+            / "jab-swing-app.jar"
         )
+    if not candidate.is_file():
+        pytest.fail(
+            f"Java demo-app JAR not found at {candidate}. Check out "
+            "play-jab-demo-app as a sibling of this repository and build it "
+            "(`gradlew jar`), or set PLAY_JAB_DEMO_APP_JAR to an existing jar."
+        )
+    return candidate
 
 
 def _log_tail(path: Path, *, limit: int = 8_000) -> str:
@@ -124,7 +132,7 @@ def _running_jvm(
     ):
         process = subprocess.Popen(
             arguments,
-            cwd=build.root,
+            cwd=build.jar_path.parent,
             stdout=stdout_file,
             stderr=stderr_file,
             text=True,
@@ -443,20 +451,19 @@ def backend_factory(jab_dll_path: Path) -> Callable[[], NativeBackend]:
 
 @pytest.fixture(scope="session")
 def java_fixture_build() -> JavaFixtureBuild:
-    """Compile the Java fixture exactly once for the complete pytest session."""
-    root = _fixture_root()
-    _compile_fixture(root)
-    classes = root / "build" / "classes" / "java" / "main"
-    # Outside Gradle's own build/ tree: a JVM's log file handle staying open
-    # past this session previously made `gradle clean` fail to delete build/
-    # (test-app-review.md finding B10).
+    """Resolve the pre-built Java fixture JAR once for the pytest session."""
+    jar_path = _demo_app_jar_path()
+    # Outside any build tree: a JVM's log file handle staying open past this
+    # session previously made `gradle clean` fail to delete build/ in the old
+    # in-tree fixture project (test-app-review.md finding B10) - kept out of
+    # play-jab-demo-app's own build/ for the same reason.
     log_directory = (
         Path(tempfile.gettempdir())
         / "play-jab-integration-logs"
         / f"{os.getpid()}-{time.time_ns()}"
     )
     log_directory.mkdir(parents=True, exist_ok=False)
-    return JavaFixtureBuild(root, classes, log_directory)
+    return JavaFixtureBuild(jar_path, log_directory)
 
 
 _JAVA_EXECUTABLE: str | None = None
@@ -484,9 +491,8 @@ def _fixture_command(
         )
     return [
         *command,
-        "-cp",
-        str(build.classes),
-        "FixtureLauncher",
+        "-jar",
+        str(build.jar_path),
         *arguments,
     ]
 

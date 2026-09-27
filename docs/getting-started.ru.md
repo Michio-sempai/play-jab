@@ -145,16 +145,19 @@ uv run pytest
 ```
 
 Для реальных интеграционных тестов JAB дополнительно нужны интерактивный рабочий
-стол Windows и JDK 17. Они запускаются последовательно:
+стол Windows, JDK 17 и репозиторий
+[`play-jab-demo-app`](https://gitlab.com/dashanovsd/play-jab-demo-app),
+выложенный рядом с этим репозиторием (`PLAY_JAB_DEMO_APP_JAR` задаёт другой
+путь к собранному JAR). Тесты запускаются последовательно:
 
 ```powershell
 $env:PLAY_JAB_RUN_INTEGRATION = "1"
 uv run pytest tests/integration
 ```
 
-stdout/stderr JVM сохраняются в
-`tests/java-fixtures/jab-swing-app/build/integration-logs/`. Настройка среды
-разработки описана в [CONTRIBUTING.md](../CONTRIBUTING.md).
+stdout/stderr JVM сохраняются во временном каталоге ОС, в
+`play-jab-integration-logs/<pid>-<время>/` — см. `tests/integration/conftest.py`.
+Настройка среды разработки описана в [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 GitHub job real-JAB требует self-hosted runner с labels `windows`, `x64`,
 `interactive`, `jab` и защищённое environment `real-jab`. Для включения задайте

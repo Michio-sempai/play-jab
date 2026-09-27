@@ -144,17 +144,20 @@ uv sync --all-groups
 uv run pytest
 ```
 
-Real JAB integration tests additionally require an interactive Windows desktop
-and JDK 17. They run serially with:
+Real JAB integration tests additionally require an interactive Windows desktop,
+JDK 17, and the [`play-jab-demo-app`](https://gitlab.com/dashanovsd/play-jab-demo-app)
+repository checked out as a sibling of this one (`PLAY_JAB_DEMO_APP_JAR`
+overrides the path to its built JAR). They run serially with:
 
 ```powershell
 $env:PLAY_JAB_RUN_INTEGRATION = "1"
 uv run pytest tests/integration
 ```
 
-JVM stdout/stderr diagnostics are written under
-`tests/java-fixtures/jab-swing-app/build/integration-logs/`. Contributor setup is
-covered in [CONTRIBUTING.md](../CONTRIBUTING.md).
+JVM stdout/stderr diagnostics are written under a session-scoped directory in
+the OS temp folder, `play-jab-integration-logs/<pid>-<timestamp>/` - see
+`tests/integration/conftest.py`. Contributor setup is covered in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 The GitHub real-JAB job requires a self-hosted runner labelled `windows`, `x64`,
 `interactive`, and `jab`, protected by the `real-jab` environment. Set the
