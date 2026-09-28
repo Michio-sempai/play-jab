@@ -29,6 +29,8 @@ pytestmark = pytest.mark.skipif(
 TRUE = 1
 FALSE = 0
 TARGET_HWND = 0x4242
+OWNED_DIALOG_HWND = 0x5151
+GA_ROOTOWNER = 3
 PID = 4242
 SUCCESS_AFTER_TWO_ATTEMPTS = 2
 REPEATED_KEYS = 3
@@ -47,6 +49,10 @@ class StubUser32:
         # Number of `SetForegroundWindow` calls after which `GetForegroundWindow`
         # starts reporting the target hwnd; `None` means it never does.
         self.succeed_after_attempts: int | None = 1
+        # `GetAncestor(hwnd, GA_ROOTOWNER)` results; unknown hwnd -> NULL.
+        self.root_owners: dict[int, int] = {}
+        # hwnds `LogicalToPhysicalPointForPerMonitorDPI` returns FALSE for.
+        self.logical_to_physical_rejects: set[int] = set()
 
         def enum_windows(_callback: Any, _param: int) -> int:
             return TRUE
@@ -87,9 +93,14 @@ class StubUser32:
             return 1
 
         def logical_to_physical_point_for_per_monitor_dpi(
-            _hwnd: int, _point_ref: Any
+            hwnd: int, _point_ref: Any
         ) -> int:
-            return TRUE
+            self.calls.append(("LogicalToPhysicalPointForPerMonitorDPI", (hwnd,)))
+            return FALSE if hwnd in self.logical_to_physical_rejects else TRUE
+
+        def get_ancestor(hwnd: int, flags: int) -> int:
+            self.calls.append(("GetAncestor", (hwnd, flags)))
+            return self.root_owners.get(hwnd, 0)
 
         def send_input(count: int, _inputs: Any, _size: int) -> int:
             self.send_counts.append(count)
@@ -109,6 +120,7 @@ class StubUser32:
             logical_to_physical_point_for_per_monitor_dpi
         )
         self.SendInput = send_input
+        self.GetAncestor = get_ancestor
 
 
 @pytest.fixture
@@ -145,6 +157,55 @@ def test_set_foreground_window_raises_after_all_failed_attempts(
     attempts = [call for call in stub_user32.calls if call[0] == "SetForegroundWindow"]
     max_attempts = sync_api._FOREGROUND_ATTEMPTS
     assert len(attempts) == max_attempts
+
+
+def test_logical_to_physical_point_converts_through_the_root_owner(
+    stub_user32: StubUser32,
+) -> None:
+    """Regression: a click inside a small owned dialog failed with
+    ``OSError: [WinError 0]``.
+
+    Confirmed on a real Swing app (system-DPI-aware JVM, 125 % monitor):
+    ``LogicalToPhysicalPointForPerMonitorDPI`` rejects a point that lies
+    outside the passed window's own rect, and it compares the *logical* JAB
+    point with the *physical* rect. For a small owned dialog (ask-string,
+    object chooser) the logical point of its own button falls outside that
+    physical rect, so the call returned FALSE without a last-error; the same
+    point converted through the root owner (the main frame) succeeded and
+    landed exactly on the button. One DPI scale applies to the whole JVM, so
+    the root owner's mapping is the right one for every window it owns.
+    """
+    stub_user32.root_owners = {OWNED_DIALOG_HWND: TARGET_HWND}
+    stub_user32.logical_to_physical_rejects = {OWNED_DIALOG_HWND}
+    backend = sync_api._Win32WindowBackend()
+
+    assert backend.logical_to_physical_point(OWNED_DIALOG_HWND, 10, 20) == (10, 20)
+
+    conversions = [
+        call
+        for call in stub_user32.calls
+        if call[0] == "LogicalToPhysicalPointForPerMonitorDPI"
+    ]
+    assert conversions == [("LogicalToPhysicalPointForPerMonitorDPI", (TARGET_HWND,))]
+    assert ("GetAncestor", (OWNED_DIALOG_HWND, GA_ROOTOWNER)) in stub_user32.calls
+
+
+def test_logical_to_physical_point_falls_back_to_the_window_without_root_owner(
+    stub_user32: StubUser32,
+) -> None:
+    """``GetAncestor`` returns NULL for an invalid/destroyed hwnd: convert
+    through the window itself so the failure surfaces as before."""
+    stub_user32.logical_to_physical_rejects = {OWNED_DIALOG_HWND}
+    ctypes.set_last_error(0)
+    backend = sync_api._Win32WindowBackend()
+
+    with pytest.raises(OSError, match=r"\[WinError 0\]"):
+        backend.logical_to_physical_point(OWNED_DIALOG_HWND, 10, 20)
+
+    assert (
+        "LogicalToPhysicalPointForPerMonitorDPI",
+        (OWNED_DIALOG_HWND,),
+    ) in stub_user32.calls
 
 
 def test_keyboard_input_batches_keys_repetition_and_utf16_units(

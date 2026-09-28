@@ -80,6 +80,7 @@ _STILL_ACTIVE = 259
 _FOREGROUND_ATTEMPTS = 10
 _FOREGROUND_RETRY_INTERVAL = 0.05
 _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+_GA_ROOTOWNER = 3
 _INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
 _MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -414,6 +415,8 @@ class _Win32WindowBackend:
             ctypes.POINTER(wintypes.POINT),
         ]
         self._user32.LogicalToPhysicalPointForPerMonitorDPI.restype = wintypes.BOOL
+        self._user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        self._user32.GetAncestor.restype = wintypes.HWND
         self._configure_input()
 
     def _configure_input(self) -> None:
@@ -518,9 +521,16 @@ class _Win32WindowBackend:
         return int(previous)
 
     def logical_to_physical_point(self, hwnd: int, x: int, y: int) -> tuple[int, int]:
+        # Convert through the root owner, not `hwnd` itself: the API rejects a
+        # point outside the passed window's rect (FALSE, last-error 0), and it
+        # compares the *logical* point with the *physical* rect - so the
+        # logical point of a button in a small owned dialog on a >100 % monitor
+        # falls "outside" that dialog. A non-per-monitor-aware JVM has one
+        # scale for all its windows, so the root owner's mapping is exact.
+        root = int(self._user32.GetAncestor(hwnd, _GA_ROOTOWNER) or 0) or hwnd
         point = self._wintypes.POINT(x, y)
         if not self._user32.LogicalToPhysicalPointForPerMonitorDPI(
-            hwnd, ctypes.byref(point)
+            root, ctypes.byref(point)
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         return int(point.x), int(point.y)
