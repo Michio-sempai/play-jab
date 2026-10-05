@@ -1,3 +1,9 @@
+## v2026.10.0 (2026-10-05)
+
+### Fix
+
+- convert click/scroll coordinates through the root owner window
+
 ## v2026.09.1 (2026-09-27)
 
 ### Feat
