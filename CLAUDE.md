@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`play-jab` is a typed Python library (pre-alpha) that automates Java desktop
-applications on Windows through the native Java Access Bridge (JAB), with a
-Playwright-style locator API. It is Windows-only, has zero runtime
-dependencies, and never launches or stops the target Java process — it only
-attaches to an already-running one.
+`play-jab` is a typed Python library (in active development) that automates
+Java desktop applications on Windows through the native Java Access Bridge
+(JAB), with a Playwright-style locator API. It is Windows-only, has zero
+runtime dependencies, and never launches or stops the target Java process — it
+only attaches to an already-running one.
 
 ## Commands
 

@@ -6,7 +6,7 @@
 
 [Русская версия](README_RU.MD)
 
-[![Project status](https://img.shields.io/badge/status-pre--alpha-orange)](#project-status)
+[![Project status](https://img.shields.io/badge/status-active%20development-blue)](#project-status)
 [![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Pipeline](https://gitlab.com/dashanovsd/play-jab/badges/main/pipeline.svg)](https://gitlab.com/dashanovsd/play-jab/-/pipelines)
 [![Coverage](https://gitlab.com/dashanovsd/play-jab/badges/main/coverage.svg)](https://gitlab.com/dashanovsd/play-jab/-/graphs/main/charts)
@@ -22,9 +22,9 @@ native-reference lifecycle management.
 ## Project status
 
 > [!IMPORTANT]
-> **Pre-alpha MVP.** The synchronous attach-only automation API is available,
-> but breaking changes are still possible. `PlayJab` never launches or stops the
-> target Java process.
+> **In active development.** The synchronous attach-only automation API is
+> available, but breaking changes are still possible. `PlayJab` never launches
+> or stops the target Java process.
 
 ## Highlights
 

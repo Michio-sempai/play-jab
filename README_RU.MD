@@ -6,7 +6,7 @@
 
 [English version](README.md)
 
-[![Статус проекта](https://img.shields.io/badge/status-pre--alpha-orange)](#статус-проекта)
+[![Статус проекта](https://img.shields.io/badge/status-active%20development-blue)](#статус-проекта)
 [![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Pipeline](https://gitlab.com/dashanovsd/play-jab/badges/main/pipeline.svg)](https://gitlab.com/dashanovsd/play-jab/-/pipelines)
 [![Coverage](https://gitlab.com/dashanovsd/play-jab/badges/main/coverage.svg)](https://gitlab.com/dashanovsd/play-jab/-/graphs/main/charts)
@@ -22,9 +22,9 @@ API поверх нативного Java Access Bridge (JAB), управляет
 ## Статус проекта
 
 > [!IMPORTANT]
-> **Pre-alpha MVP.** Синхронный attach-only API автоматизации уже доступен,
-> но несовместимые изменения всё ещё возможны. `PlayJab` никогда не запускает и
-> не останавливает целевой Java-процесс.
+> **В активной разработке.** Синхронный attach-only API автоматизации уже
+> доступен, но несовместимые изменения всё ещё возможны. `PlayJab` никогда не
+> запускает и не останавливает целевой Java-процесс.
 
 ## Возможности
 

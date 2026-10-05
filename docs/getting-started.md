@@ -3,7 +3,7 @@
 [Русская версия](getting-started.ru.md) · [Back to README](../README.md)
 
 This guide prepares a Windows environment for `play-jab` and documents the
-package surface available in the current pre-alpha release.
+package surface available in the current release.
 
 ## 1. Check the prerequisites
 
